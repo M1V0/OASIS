@@ -11,6 +11,17 @@ import threading
 PAGE_SIZE = 100
 API_BASE = "https://api.osf.io/v2/preprints/"
 
+# Known OSF providers
+OSF_PROVIDERS = {
+    "psyarxiv": "PsyArXiv",
+    "socarxiv": "SocArXiv",
+    "engrxiv": "engrXiv",
+    "lawarxiv": "LawArXiv",
+    "medrxiv": "MedArXiv",
+    "ecsarxiv": "ECSarXiv",
+    "thesiscommons": "Thesis Commons"
+}
+
 # ----------------- Global Abort Flag -----------------
 abort_flag = False
 
@@ -83,7 +94,11 @@ class OSFPreprints:
                                     if isinstance(u, dict):
                                         name = u.get("attributes", {}).get("full_name")
                                 if not name:
-                                    name = c.get("attributes", {}).get("full_name") if isinstance(c.get("attributes", {}), dict) else None
+                                    name = (
+                                        c.get("attributes", {}).get("full_name")
+                                        if isinstance(c.get("attributes", {}), dict)
+                                        else None
+                                    )
                                 if name:
                                     contributors.append(name)
             except Exception:
@@ -97,7 +112,8 @@ class OSFPreprints:
                 "Tags": ",".join([t if isinstance(t, str) else str(t) for t in tags]),
                 "DOI": doi,
                 "URL": url,
-                "Contributors": ", ".join(contributors)
+                "Contributors": ", ".join(contributors),
+                "Provider": self.provider,
             })
         return rows
 
@@ -199,27 +215,51 @@ def ast_to_conjunctions(node):
     raise ValueError("Unknown AST node")
 
 def choose_seed_term(conj):
-    """Pick the longest term as seed, but strip '*' before sending to API."""
-    cleaned = [(t, len(t.replace('*',''))) for t in conj]
-    chosen = max(cleaned, key=lambda x: x[1])[0]
-    return chosen.replace('*', '')  # remove wildcards for API fetch
+    cleaned = [(t.replace('*',''), len(t.replace('*',''))) for t in conj]
+    return max(cleaned, key=lambda x: x[1])[0]
 
+# ----------------- UK/US spelling variants -----------------
+UK_US_MAP = {
+    "colour": "color",
+    "labour": "labor",
+    "behaviour": "behavior",
+    "favour": "favor",
+    "organisation": "organization",
+    "recognise": "recognize",
+    "analyse": "analyze",
+    "theatre": "theater",
+    "centre": "center"
+}
+
+def expand_variants(term):
+    variants = [term]
+    for uk, us in UK_US_MAP.items():
+        if uk in term.lower():
+            variants.append(re.sub(uk, us, term, flags=re.IGNORECASE))
+        if us in term.lower():
+            variants.append(re.sub(us, uk, term, flags=re.IGNORECASE))
+    return list(set(variants))
+
+# ----------------- Local filtering -----------------
 def filter_df_for_conjunction(df, conj):
     if df.empty:
         return df
     mask_all = pd.Series([True] * len(df), index=df.index)
     for term in conj:
-        term = str(term)
-        if '*' in term:
-            pieces = [re.escape(p) for p in term.split('*')]
-            pattern = '.*'.join(pieces)
-            term_mask = df['Title'].str.contains(pattern, case=False, na=False, regex=True) | \
-                        df['Abstract'].str.contains(pattern, case=False, na=False, regex=True)
-        else:
-            esc = re.escape(term)
-            term_mask = df['Title'].str.contains(esc, case=False, na=False, regex=True) | \
-                        df['Abstract'].str.contains(esc, case=False, na=False, regex=True)
-        mask_all &= term_mask
+        variants = expand_variants(term)
+        term_mask_variant = pd.Series([False] * len(df), index=df.index)
+        for v in variants:
+            if '*' in v:
+                pieces = [re.escape(p) for p in v.split('*')]
+                pattern = '.*'.join(pieces)
+                term_mask = df['Title'].str.contains(pattern, case=False, na=False, regex=True) | \
+                            df['Abstract'].str.contains(pattern, case=False, na=False, regex=True)
+            else:
+                esc = re.escape(v)
+                term_mask = df['Title'].str.contains(esc, case=False, na=False, regex=True) | \
+                            df['Abstract'].str.contains(esc, case=False, na=False, regex=True)
+            term_mask_variant |= term_mask
+        mask_all &= term_mask_variant
         if not mask_all.any():
             return df.iloc[0:0]
     return df[mask_all]
@@ -238,69 +278,139 @@ def keep_latest_versions(df):
     df_latest = df.loc[idx].drop(columns=['base_id', 'version']).reset_index(drop=True)
     return df_latest
 
-def evaluate_boolean_query(query, feedback_box=None, progress_bar=None):
+# ----------------- Evaluate Boolean Query with multiple seed terms -----------------
+def evaluate_boolean_query(query, provider, feedback_box=None, progress_bar=None):
     tokens = tokenize(query)
     ast = parse_tokens(tokens)
     conjunctions = ast_to_conjunctions(ast)
-    client = OSFPreprints(provider="psyarxiv")
+    client = OSFPreprints(provider=provider)
+
+    # Prepare cleaned seed lists per conjunction (strip '*' for API)
+    cleaned_seeds_per_conj = []
+    total_seeds = 0
+    for conj in conjunctions:
+        cleaned = []
+        for t in conj:
+            cs = str(t).replace('*', '').strip()
+            if cs:
+                cleaned.append(cs)
+        # ensure original choose_seed_term is included (guarantees >= original behavior)
+        chosen = choose_seed_term(conj)
+        if isinstance(chosen, str):
+            chosen_clean = str(chosen).replace('*', '').strip()
+            if chosen_clean and chosen_clean not in cleaned:
+                cleaned.append(chosen_clean)
+        # unique-preserve-order
+        seen = set()
+        cleaned_unique = []
+        for s in cleaned:
+            if s not in seen:
+                seen.add(s)
+                cleaned_unique.append(s)
+        cleaned_seeds_per_conj.append(cleaned_unique)
+        total_seeds += len(cleaned_unique)
+
     all_parts = []
-    total = len(conjunctions)
+    progress_count = 0
+    fetched_cache = {}  # cleaned_seed -> df
+
     if feedback_box:
-        feedback_box.insert(tk.END, f"Expanded to {total} conjunction(s): {conjunctions}\n")
+        feedback_box.insert(tk.END, f"Expanded to {len(conjunctions)} conjunction(s): {conjunctions}\n")
         feedback_box.see(tk.END)
+
     for i, conj in enumerate(conjunctions, start=1):
         if abort_flag:
             if feedback_box:
                 feedback_box.insert(tk.END, "Aborted by user.\n")
                 feedback_box.see(tk.END)
             break
-        if feedback_box:
-            feedback_box.insert(tk.END, f"-- Conjunction {i}/{total}: {conj}\n")
-            feedback_box.see(tk.END)
-        seed = choose_seed_term(conj)
-        if feedback_box:
-            feedback_box.insert(tk.END, f"   Using seed '{seed}' for API fetch (then local filter)\n")
-            feedback_box.see(tk.END)
-        df_seed = client.run(seed)
-        df_filtered = filter_df_for_conjunction(df_seed, conj)
-        all_parts.append(df_filtered)
-        if progress_bar:
-            progress_bar['value'] = min(100, int(100 * (i / total)))
-            progress_bar.update()
 
+        if feedback_box:
+            feedback_box.insert(tk.END, f"-- Conjunction {i}/{len(conjunctions)}: {conj}\n")
+            feedback_box.see(tk.END)
+
+        seeds = cleaned_seeds_per_conj[i - 1]
+        conj_results = []
+
+        for seed_clean in seeds:
+            if abort_flag:
+                break
+            # Skip empty cleaned seeds (e.g., if term was only '*')
+            if not seed_clean:
+                progress_count += 1
+                if progress_bar:
+                    progress_bar['value'] = min(100, int(100 * (progress_count / max(1, total_seeds))))
+                    progress_bar.update()
+                continue
+
+            if feedback_box:
+                feedback_box.insert(tk.END, f"   Using seed '{seed_clean}' for API fetch\n")
+                feedback_box.see(tk.END)
+
+            # Use cached fetch when possible
+            if seed_clean in fetched_cache:
+                df_seed = fetched_cache[seed_clean]
+            else:
+                df_seed = client.run(seed_clean)
+                fetched_cache[seed_clean] = df_seed
+
+            # local filter for the full conjunction (title + abstract + variants + wildcards)
+            df_filtered = filter_df_for_conjunction(df_seed, conj)
+            conj_results.append(df_filtered)
+
+            # update progress
+            progress_count += 1
+            if progress_bar:
+                progress_bar['value'] = min(100, int(100 * (progress_count / max(1, total_seeds))))
+                progress_bar.update()
+
+        # union results from all seeds for this conjunction
+        if conj_results:
+            combined_df = pd.concat(conj_results, ignore_index=True)
+            combined_df = combined_df.drop_duplicates(subset="ID")
+            all_parts.append(combined_df)
+
+    # union across conjunctions
     if all_parts:
         result_df = pd.concat(all_parts, ignore_index=True).drop_duplicates(subset="ID")
     else:
-        result_df = pd.DataFrame(columns=["ID", "Title", "Abstract", "Date Published", "Tags", "DOI", "URL", "Contributors"])
+        result_df = pd.DataFrame(columns=[
+            "ID", "Title", "Abstract", "Date Published", "Tags", "DOI", "URL", "Contributors", "Provider"
+        ])
+
+    # Keep only latest versions
     result_df = keep_latest_versions(result_df)
     return result_df, conjunctions
 
-def build_preview_urls_from_query(query):
+
+# ----------------- Preview URLs -----------------
+def build_preview_urls_from_query(query, provider):
     tokens = tokenize(query)
     ast = parse_tokens(tokens)
     conjunctions = ast_to_conjunctions(ast)
-    client = OSFPreprints()
+    client = OSFPreprints(provider)
     urls = []
     for conj in conjunctions:
-        seed = choose_seed_term(conj)  # already strips '*'
-        urls.append((conj, client.build_url(query=seed, page=1)))
+        for seed in conj:
+            urls.append((conj, client.build_url(query=seed, page=1)))
     return urls
 
 # ----------------- GUI functions -----------------
 def run_scraper():
     global abort_flag
     abort_flag = False
-    base_filename = filename_entry.get().strip() or "Data_PsyArXiv"
+    base_filename = filename_entry.get().strip() or "Data_Preprints"
     feedback_box.delete(1.0, tk.END)
     progress_bar['value'] = 0
 
     query = query_text.get("1.0", tk.END).strip()
+    provider = provider_var.get()
     if not query:
         messagebox.showerror("Error", "Enter a Boolean query first.")
         return
 
     try:
-        df, conj = evaluate_boolean_query(query, feedback_box, progress_bar)
+        df, conj = evaluate_boolean_query(query, provider, feedback_box, progress_bar)
         if abort_flag:
             feedback_box.insert(tk.END, "Scraping aborted by user.\n")
             feedback_box.see(tk.END)
@@ -309,7 +419,7 @@ def run_scraper():
             messagebox.showwarning("No Results", "No preprints found (after local filtering).")
             feedback_box.insert(tk.END, "No preprints found.\n")
             return
-        filename = f"{base_filename}.csv"
+        filename = f"{base_filename}_{provider}.csv"
         df.to_csv(filename, index=False)
         msg = f"Scraping complete! {len(df)} unique preprints (latest versions only) saved to {filename}"
         feedback_box.insert(tk.END, msg + "\n")
@@ -326,18 +436,19 @@ def threaded_run_scraper():
 
 def preview_url():
     query = query_text.get("1.0", tk.END).strip()
+    provider = provider_var.get()
     if not query:
         messagebox.showwarning("Preview URL", "Enter a Boolean query first.")
         return
     try:
-        urls = build_preview_urls_from_query(query)
+        urls = build_preview_urls_from_query(query, provider)
     except Exception as e:
         messagebox.showerror("Error parsing query", str(e))
         return
 
     popup = tk.Toplevel(root)
-    popup.title("Preview PsyArXiv API URLs (per conjunction)")
-    tk.Label(popup, text="These seed API calls will be executed; each will then be filtered locally to satisfy the full conjunction:").pack(pady=5)
+    popup.title("Preview OSF API URLs (per seed term)")
+    tk.Label(popup, text=f"Provider: {provider}\nThese seed API calls will be executed; each will then be filtered locally:").pack(pady=5)
     url_box = scrolledtext.ScrolledText(popup, width=120, height=10)
     url_box.pack(padx=5, pady=5)
     for combined, u in urls:
@@ -355,28 +466,34 @@ def preview_url():
 
 # ----------------- GUI Layout -----------------
 root = tk.Tk()
-root.title("PsyArXiv Screening Scraper")
+root.title("OSF Boolean Scraper (multi-provider, with Abort & UK/US handling)")
 
 root.bind("<Escape>", set_abort)
 
 # Query entry
 query_frame = tk.Frame(root)
 query_frame.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
-tk.Label(query_frame, text='Enter Boolean query (use AND, OR, parentheses). Example: ("behavioral" OR "behavioural") AND abuse').pack(anchor="w")
+tk.Label(query_frame, text='Enter Boolean query (use AND, OR, parentheses, * wildcards). Example: (behaviour OR behavior) AND learning').pack(anchor="w")
 query_text = scrolledtext.ScrolledText(query_frame, height=3, width=100)
 query_text.pack(padx=5, pady=5)
 
 # Options frame
 options_frame = tk.Frame(root)
 options_frame.grid(row=1, column=0, sticky="ew", padx=5, pady=5)
+
 tk.Label(options_frame, text="Base filename:").grid(row=0, column=0, padx=5)
 filename_entry = tk.Entry(options_frame, width=25)
-filename_entry.insert(0, "Data_PsyArXiv")
+filename_entry.insert(0, "Data_Preprints")
 filename_entry.grid(row=0, column=1, padx=5)
 
-tk.Button(options_frame, text="Run Scraper", command=threaded_run_scraper).grid(row=0, column=2, padx=5)
-tk.Button(options_frame, text="Preview URLs", command=preview_url).grid(row=0, column=3, padx=5)
-tk.Button(options_frame, text="Abort (Esc)", command=set_abort).grid(row=0, column=4, padx=5)
+tk.Label(options_frame, text="Provider:").grid(row=0, column=2, padx=5)
+provider_var = tk.StringVar(value="psyarxiv")
+provider_menu = ttk.Combobox(options_frame, textvariable=provider_var, values=list(OSF_PROVIDERS.keys()), state="readonly")
+provider_menu.grid(row=0, column=3, padx=5)
+
+tk.Button(options_frame, text="Run Scraper", command=threaded_run_scraper).grid(row=0, column=4, padx=5)
+tk.Button(options_frame, text="Preview URLs", command=preview_url).grid(row=0, column=5, padx=5)
+tk.Button(options_frame, text="Abort (Esc)", command=set_abort).grid(row=0, column=6, padx=5)
 
 # Feedback and progress
 feedback_box = scrolledtext.ScrolledText(root, height=12, width=100)
