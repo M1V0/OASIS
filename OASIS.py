@@ -580,7 +580,7 @@ class OASISScraperApp(QMainWindow):
         
         # Graphic placeholder
         try:
-            graphic_pixmap = QPixmap("OASIS.png")
+            graphic_pixmap = QPixmap("var/OASIS.png")
             if not graphic_pixmap.isNull():
                 graphic_label = QLabel()
                 graphic_label.setPixmap(graphic_pixmap.scaled(75, 75, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
@@ -700,7 +700,7 @@ class OASISScraperApp(QMainWindow):
         self.run_button.clicked.connect(self.run_scraper)
         
         # Prepare spinner but don’t show yet
-        self.spinner_movie = QMovie("spinner.gif")
+        self.spinner_movie = QMovie("var/spinner.gif")
         self.spinner_movie.setScaledSize(QSize(16, 16))  # make spinner small enough
         
         self.abort_button = QPushButton("Abort")
@@ -738,7 +738,7 @@ class OASISScraperApp(QMainWindow):
         footer_layout = QHBoxLayout(footer_frame)
         footer_layout.setContentsMargins(0, 5, 0, 0)
         
-        license_link = QLabel('<a href="https://creativecommons.org/licenses/by/4.0/">CC-BY License</a>')
+        license_link = QLabel('<a href="https://creativecommons.org/licenses/by-nc-sa/4.0/">CC-BY-NC-SA License</a>')
         license_link.setOpenExternalLinks(True)
         license_link.setStyleSheet("color: #0066cc;")
         
@@ -1026,10 +1026,10 @@ class OASISScraperApp(QMainWindow):
         server_name = self.current_server
         
         if SERVERS[server_name]["type"] == "arxiv":
-            filename = f"{base_filename}_{server_name}.csv"
+            filename = f"data/{base_filename}_{server_name}.csv"
         else:
             search_mode = "OSF_API" if self.standard_radio.isChecked() else "weblike"
-            filename = f"{base_filename}_{server_name}_{search_mode}.csv"
+            filename = f"data/{base_filename}_{server_name}_{search_mode}.csv"
         
         df.to_csv(filename, index=False)
         
