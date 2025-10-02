@@ -733,6 +733,30 @@ class OASISScraperApp(QMainWindow):
         feedback_group.setLayout(feedback_layout)
         main_layout.addWidget(feedback_group)
         
+        # Footer section
+        footer_frame = QFrame()
+        footer_layout = QHBoxLayout(footer_frame)
+        footer_layout.setContentsMargins(0, 5, 0, 0)
+        
+        license_link = QLabel('<a href="https://creativecommons.org/licenses/by/4.0/">CC-BY License</a>')
+        license_link.setOpenExternalLinks(True)
+        license_link.setStyleSheet("color: #0066cc;")
+        
+        github_link = QLabel('<a href="https://github.com/M1V0/OASIS">GitHub</a>')
+        github_link.setOpenExternalLinks(True)
+        github_link.setStyleSheet("color: #0066cc;")
+        
+        creator_label = QLabel("Created by Matthew Ivory")
+        creator_label.setStyleSheet("color: gray; font-size: 11px;")
+        
+        footer_layout.addWidget(license_link)
+        footer_layout.addSpacing(15)
+        footer_layout.addWidget(github_link)
+        footer_layout.addStretch()
+        footer_layout.addWidget(creator_label)
+        
+        main_layout.addWidget(footer_frame)
+
         # Initialize UI state
         self.server_changed("ArXiv")
 
