@@ -1,4 +1,5 @@
 import httpx
+import os
 import pandas as pd
 import re
 import webbrowser
@@ -398,7 +399,8 @@ class ScraperThread(QThread):
         self.url = url
         self.client = None
         self.abort_flag = False
-
+        
+        
     def run(self):
         try:
             if self.server_config["type"] == "arxiv":
@@ -481,6 +483,10 @@ class OASISScraperApp(QMainWindow):
         self.scraper_thread = None
         self.current_server = "ArXiv"
         
+        # Ensure data/ and logs/ folders exist
+        os.makedirs("data", exist_ok=True)
+        os.makedirs("logs", exist_ok=True)
+
         # Create log filename with timestamp for this session
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         self.log_filename = f"logs/OASIS_Log_{timestamp}.txt"
