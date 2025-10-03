@@ -1,0 +1,48 @@
+2025-10-03 07:54:43 [INFO] === New OASIS session started ===
+2025-10-03 07:54:51 [INFO] Running search on server=PsyArXiv, query='deepfake'
+2025-10-03 07:54:52 [INFO] HTTP Request: GET https://api.osf.io/v2/preprints/?filter%5Bprovider%5D=psyarxiv&page%5Bsize%5D=100&page%5Bnumber%5D=1&filter%5Btitle%5D%5Bicontains%5D=deepfake "HTTP/1.1 200 OK"
+2025-10-03 07:54:52 [INFO] Search completed successfully on server=PsyArXiv, results=9
+2025-10-03 07:54:56 [INFO] Running search on server=PsyArXiv, query='deepfake'
+2025-10-03 07:54:56 [INFO] HTTP Request: POST https://share.osf.io/api/v2/search/creativeworks/_search "HTTP/1.1 200 OK"
+2025-10-03 07:54:56 [INFO] Search completed successfully on server=PsyArXiv, results=14
+2025-10-03 07:55:00 [INFO] Running search on server=PsyArXiv, query='deepfake*'
+2025-10-03 07:55:02 [INFO] HTTP Request: POST https://share.osf.io/api/v2/search/creativeworks/_search "HTTP/1.1 200 OK"
+2025-10-03 07:55:02 [INFO] Search completed successfully on server=PsyArXiv, results=20
+2025-10-03 07:55:16 [INFO] Running search on server=PsyArXiv, query='deepfake* OR "deep fake*"'
+2025-10-03 07:55:19 [INFO] HTTP Request: POST https://share.osf.io/api/v2/search/creativeworks/_search "HTTP/1.1 200 OK"
+2025-10-03 07:55:19 [INFO] Search completed successfully on server=PsyArXiv, results=21
+2025-10-03 07:55:23 [INFO] Running search on server=PsyArXiv, query='"deep fake*"'
+2025-10-03 07:55:24 [INFO] HTTP Request: POST https://share.osf.io/api/v2/search/creativeworks/_search "HTTP/1.1 200 OK"
+2025-10-03 07:55:24 [INFO] Search completed successfully on server=PsyArXiv, results=3
+2025-10-03 08:09:49 [INFO] Running search on server=PsyArXiv, query='deepfake'
+2025-10-03 08:09:50 [INFO] HTTP Request: GET https://api.osf.io/v2/preprints/?filter%5Bprovider%5D=psyarxiv&page%5Bsize%5D=100&page%5Bnumber%5D=1&filter%5Btitle%5D%5Bicontains%5D=deepfake "HTTP/1.1 200 OK"
+2025-10-03 08:09:50 [INFO] Search completed successfully on server=PsyArXiv, results=9
+2025-10-03 08:09:56 [INFO] Running search on server=PsyArXiv, query='deepfake*'
+2025-10-03 08:09:56 [INFO] HTTP Request: GET https://api.osf.io/v2/preprints/?filter%5Bprovider%5D=psyarxiv&page%5Bsize%5D=100&page%5Bnumber%5D=1&filter%5Btitle%5D%5Bicontains%5D=deepfake%2A "HTTP/1.1 200 OK"
+2025-10-03 08:09:56 [INFO] Search completed successfully on server=PsyArXiv, results=0
+2025-10-03 08:10:35 [INFO] Running search on server=PsyArXiv, query='cogniti'
+2025-10-03 08:10:42 [INFO] HTTP Request: GET https://api.osf.io/v2/preprints/?filter%5Bprovider%5D=psyarxiv&page%5Bsize%5D=100&page%5Bnumber%5D=1&filter%5Btitle%5D%5Bicontains%5D=cogniti "HTTP/1.1 200 OK"
+2025-10-03 08:10:49 [INFO] HTTP Request: GET https://api.osf.io/v2/preprints/?filter%5Bprovider%5D=psyarxiv&page%5Bsize%5D=100&page%5Bnumber%5D=2&filter%5Btitle%5D%5Bicontains%5D=cogniti "HTTP/1.1 200 OK"
+2025-10-03 08:11:00 [INFO] HTTP Request: GET https://api.osf.io/v2/preprints/?filter%5Bprovider%5D=psyarxiv&page%5Bsize%5D=100&page%5Bnumber%5D=3&filter%5Btitle%5D%5Bicontains%5D=cogniti "HTTP/1.1 200 OK"
+2025-10-03 08:11:06 [WARNING] Search aborted on server=PsyArXiv
+2025-10-03 08:11:12 [INFO] HTTP Request: GET https://api.osf.io/v2/preprints/?filter%5Bprovider%5D=psyarxiv&page%5Bsize%5D=100&page%5Bnumber%5D=4&filter%5Btitle%5D%5Bicontains%5D=cogniti "HTTP/1.1 200 OK"
+2025-10-03 08:11:12 [INFO] Search completed successfully on server=PsyArXiv, results=100
+2025-10-03 08:11:22 [INFO] Running search on server=PsyArXiv, query='cogniti'
+2025-10-03 08:11:31 [INFO] HTTP Request: GET https://api.osf.io/v2/preprints/?filter%5Bprovider%5D=psyarxiv&page%5Bsize%5D=100&page%5Bnumber%5D=1&filter%5Btitle%5D%5Bicontains%5D=cogniti "HTTP/1.1 200 OK"
+2025-10-03 08:11:38 [INFO] HTTP Request: GET https://api.osf.io/v2/preprints/?filter%5Bprovider%5D=psyarxiv&page%5Bsize%5D=100&page%5Bnumber%5D=2&filter%5Btitle%5D%5Bicontains%5D=cogniti "HTTP/1.1 200 OK"
+2025-10-03 08:11:46 [INFO] HTTP Request: GET https://api.osf.io/v2/preprints/?filter%5Bprovider%5D=psyarxiv&page%5Bsize%5D=100&page%5Bnumber%5D=3&filter%5Btitle%5D%5Bicontains%5D=cogniti "HTTP/1.1 200 OK"
+2025-10-03 08:11:53 [INFO] HTTP Request: GET https://api.osf.io/v2/preprints/?filter%5Bprovider%5D=psyarxiv&page%5Bsize%5D=100&page%5Bnumber%5D=4&filter%5Btitle%5D%5Bicontains%5D=cogniti "HTTP/1.1 200 OK"
+2025-10-03 08:12:02 [INFO] HTTP Request: GET https://api.osf.io/v2/preprints/?filter%5Bprovider%5D=psyarxiv&page%5Bsize%5D=100&page%5Bnumber%5D=5&filter%5Btitle%5D%5Bicontains%5D=cogniti "HTTP/1.1 200 OK"
+2025-10-03 08:12:11 [INFO] HTTP Request: GET https://api.osf.io/v2/preprints/?filter%5Bprovider%5D=psyarxiv&page%5Bsize%5D=100&page%5Bnumber%5D=6&filter%5Btitle%5D%5Bicontains%5D=cogniti "HTTP/1.1 200 OK"
+2025-10-03 08:12:21 [INFO] HTTP Request: GET https://api.osf.io/v2/preprints/?filter%5Bprovider%5D=psyarxiv&page%5Bsize%5D=100&page%5Bnumber%5D=7&filter%5Btitle%5D%5Bicontains%5D=cogniti "HTTP/1.1 200 OK"
+2025-10-03 08:12:30 [INFO] HTTP Request: GET https://api.osf.io/v2/preprints/?filter%5Bprovider%5D=psyarxiv&page%5Bsize%5D=100&page%5Bnumber%5D=8&filter%5Btitle%5D%5Bicontains%5D=cogniti "HTTP/1.1 200 OK"
+2025-10-03 08:12:36 [INFO] HTTP Request: GET https://api.osf.io/v2/preprints/?filter%5Bprovider%5D=psyarxiv&page%5Bsize%5D=100&page%5Bnumber%5D=9&filter%5Btitle%5D%5Bicontains%5D=cogniti "HTTP/1.1 200 OK"
+2025-10-03 08:12:45 [INFO] HTTP Request: GET https://api.osf.io/v2/preprints/?filter%5Bprovider%5D=psyarxiv&page%5Bsize%5D=100&page%5Bnumber%5D=10&filter%5Btitle%5D%5Bicontains%5D=cogniti "HTTP/1.1 200 OK"
+2025-10-03 08:12:54 [INFO] HTTP Request: GET https://api.osf.io/v2/preprints/?filter%5Bprovider%5D=psyarxiv&page%5Bsize%5D=100&page%5Bnumber%5D=11&filter%5Btitle%5D%5Bicontains%5D=cogniti "HTTP/1.1 200 OK"
+2025-10-03 08:13:00 [INFO] HTTP Request: GET https://api.osf.io/v2/preprints/?filter%5Bprovider%5D=psyarxiv&page%5Bsize%5D=100&page%5Bnumber%5D=12&filter%5Btitle%5D%5Bicontains%5D=cogniti "HTTP/1.1 200 OK"
+2025-10-03 08:13:08 [INFO] HTTP Request: GET https://api.osf.io/v2/preprints/?filter%5Bprovider%5D=psyarxiv&page%5Bsize%5D=100&page%5Bnumber%5D=13&filter%5Btitle%5D%5Bicontains%5D=cogniti "HTTP/1.1 200 OK"
+2025-10-03 08:13:16 [INFO] HTTP Request: GET https://api.osf.io/v2/preprints/?filter%5Bprovider%5D=psyarxiv&page%5Bsize%5D=100&page%5Bnumber%5D=14&filter%5Btitle%5D%5Bicontains%5D=cogniti "HTTP/1.1 200 OK"
+2025-10-03 08:13:25 [INFO] HTTP Request: GET https://api.osf.io/v2/preprints/?filter%5Bprovider%5D=psyarxiv&page%5Bsize%5D=100&page%5Bnumber%5D=15&filter%5Btitle%5D%5Bicontains%5D=cogniti "HTTP/1.1 200 OK"
+2025-10-03 08:13:35 [WARNING] Search aborted on server=PsyArXiv
+2025-10-03 08:13:35 [INFO] HTTP Request: GET https://api.osf.io/v2/preprints/?filter%5Bprovider%5D=psyarxiv&page%5Bsize%5D=100&page%5Bnumber%5D=16&filter%5Btitle%5D%5Bicontains%5D=cogniti "HTTP/1.1 200 OK"
+2025-10-03 08:13:35 [INFO] Search completed successfully on server=PsyArXiv, results=100

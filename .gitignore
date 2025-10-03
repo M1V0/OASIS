@@ -3,6 +3,4 @@
 .RData
 .Ruserdata
 scrape.Rproj
-data/
-logs/
 .DS_Store
