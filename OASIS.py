@@ -3,6 +3,8 @@ import os
 import pandas as pd
 import re
 import webbrowser
+import random
+import time
 import sys
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -15,6 +17,7 @@ from PyQt6.QtGui import QFont, QPixmap, QIcon, QMovie
 from bs4 import BeautifulSoup
 import logging
 from datetime import datetime
+
 
 # ==================== CONSTANTS AND CONFIGURATION ====================
 
@@ -32,6 +35,14 @@ ARXIV_HEADERS = {
 OSF_PAGE_SIZE = 100
 OSF_API_BASE = "https://api.osf.io/v2/preprints/"
 OSF_ELASTIC_URL = "https://share.osf.io/api/v2/search/creativeworks/_search"
+
+
+# Politeness constants - for rate limits
+POLITENESS_LEVELS = {
+    "Fast": {"osf_delay": 0.1, "arxiv_delay": 1.0},       # may risk hitting limits
+    "Normal": {"osf_delay": 0.5, "arxiv_delay": 3.0},     # safe default
+    "Very Safe": {"osf_delay": 1.0, "arxiv_delay": 5.0}   # extra cautious
+}
 
 # Server configurations
 SERVERS = {
@@ -390,7 +401,7 @@ class ScraperThread(QThread):
     finished = pyqtSignal(pd.DataFrame)
     error = pyqtSignal(str)
 
-    def __init__(self, server_config, query, search_mode, conditions=None, url=None):
+    def __init__(self, server_config, query, search_mode, conditions=None, url=None, politeness=None):
         super().__init__()
         self.server_config = server_config
         self.query = query
@@ -399,7 +410,21 @@ class ScraperThread(QThread):
         self.url = url
         self.client = None
         self.abort_flag = False
-        
+        self.politeness = politeness or POLITENESS_LEVELS["Normal"]
+
+    def safe_request(client, method, url, politeness_delay=0.5, max_retries=5, **kwargs):
+        for attempt in range(max_retries):
+            res = client.request(method, url, **kwargs)
+            if res.status_code != 429:
+                time.sleep(politeness_delay)  # politeness delay after each call
+                return res
+            # Backoff if 429
+            wait = (2 ** attempt) + random.uniform(0, 1)
+            logging.warning(f"429 Too Many Requests. Backing off {wait:.1f} seconds...")
+            time.sleep(wait)
+        res.raise_for_status()
+        return res
+
         
     def run(self):
         try:
@@ -671,6 +696,13 @@ class OASISScraperApp(QMainWindow):
         config_group = QGroupBox("Search Configuration")
         config_layout = QHBoxLayout()
         
+        # Politeness setting
+        politeness_label = QLabel("| Politeness:")
+        self.politeness_combo = QComboBox()
+        self.politeness_combo.addItems(POLITENESS_LEVELS.keys())
+        self.politeness_combo.setCurrentText("Normal")
+
+
         # Server selection
         server_label = QLabel("Server:")
         server_info = InfoLabel("Choose which preprint server to search. \nArXiv covers physics, math, CS, etc.\nOSF servers are discipline-specific.")
@@ -700,6 +732,8 @@ class OASISScraperApp(QMainWindow):
         config_layout.addWidget(self.strategy_info)
         config_layout.addWidget(self.standard_radio)
         config_layout.addWidget(self.comprehensive_radio)
+        config_layout.addWidget(politeness_label)
+        config_layout.addWidget(self.politeness_combo)
 
         
         config_group.setLayout(config_layout)
@@ -994,13 +1028,18 @@ class OASISScraperApp(QMainWindow):
                         return
                     
                     logging.info(f"Running search on server={self.current_server}, query='{query if self.current_server != 'ArXiv' else 'ArXiv advanced'}'")
+                    
+                    politeness = POLITENESS_LEVELS[self.politeness_combo.currentText()]
 
                     self.scraper_thread = ScraperThread(
                         server_config=server_config,
-                        query="",
-                        search_mode="",
-                        conditions=conditions
+                        query=query,
+                        search_mode=search_mode,
+                        conditions=conditions if server_config["type"] == "arxiv" else None,
+                        url=url if server_config["type"] == "arxiv" and self.tabs.currentIndex() == 1 else None,
+                        politeness=politeness
                     )
+
                     
                 else:  # Paste URL tab
                     url = self.paste_url_text.toPlainText().strip()
@@ -1017,11 +1056,15 @@ class OASISScraperApp(QMainWindow):
                     
                     logging.info(f"Running search on server={self.current_server}, query='{query if self.current_server != 'ArXiv' else 'ArXiv advanced'}'")
 
+                    politeness = POLITENESS_LEVELS[self.politeness_combo.currentText()]
+
                     self.scraper_thread = ScraperThread(
                         server_config=server_config,
-                        query="", 
-                        search_mode="",
-                        url=url
+                        query=query,
+                        search_mode=search_mode,
+                        conditions=conditions if server_config["type"] == "arxiv" else None,
+                        url=url if server_config["type"] == "arxiv" and self.tabs.currentIndex() == 1 else None,
+                        politeness=politeness
                     )
                     
             else:
@@ -1035,11 +1078,16 @@ class OASISScraperApp(QMainWindow):
                 
                 logging.info(f"Running search on server={self.current_server}, query='{query if self.current_server != 'ArXiv' else 'ArXiv advanced'}'")
 
+                politeness = POLITENESS_LEVELS[self.politeness_combo.currentText()]
+
                 self.scraper_thread = ScraperThread(
                     server_config=server_config,
                     query=query,
-                    search_mode=search_mode
-                )
+                    search_mode=search_mode,
+                    conditions=conditions if server_config["type"] == "arxiv" else None,
+                    url=url if server_config["type"] == "arxiv" and self.tabs.currentIndex() == 1 else None,
+                    politeness=politeness
+                    )
             
             
             # Connect thread signals
