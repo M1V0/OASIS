@@ -12,6 +12,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
 from PyQt6.QtGui import QFont, QPixmap, QIcon, QMovie
 from bs4 import BeautifulSoup
+import logging
+from datetime import datetime
 
 # ==================== CONSTANTS AND CONFIGURATION ====================
 
@@ -283,10 +285,32 @@ class ElasticPreprints:
         self.client = httpx.Client(headers={"User-Agent": "Mozilla/5.0"}, timeout=30.0)
         self.abort_flag = False
 
+    def normalize_query(self, query: str) -> str:
+        """Normalize boolean operators for ElasticSearch query_string syntax."""
+        if not query:
+            return query
+
+        # Replace symbols with uppercase operators
+        query = query.replace("|", " OR ")
+        query = query.replace("&", " AND ")
+
+        # Normalize lowercase boolean operators (use regex for word boundaries)
+        import re
+        query = re.sub(r"\band\b", "AND", query, flags=re.IGNORECASE)
+        query = re.sub(r"\bor\b", "OR", query, flags=re.IGNORECASE)
+        query = re.sub(r"\bnot\b", "NOT", query, flags=re.IGNORECASE)
+
+        # Collapse multiple spaces
+        query = re.sub(r"\s+", " ", query).strip()
+        return query
+
     def run(self, query, progress_callback=None):
         rows = []
         size = 200
         start = 0
+
+        # ✅ normalize query before sending
+        query = self.normalize_query(query)
 
         while True:
             if self.abort_flag:
@@ -345,7 +369,7 @@ class ElasticPreprints:
 
             if progress_callback:
                 progress_callback.emit(f"Fetched {len(rows)} results so far...")
-            
+
             start += size
 
             if len(hits) < size:
@@ -355,6 +379,7 @@ class ElasticPreprints:
         if "ID" not in df.columns:
             df["ID"] = ""
         return df.drop_duplicates(subset="ID")
+
 
 # ==================== WORKER THREAD ====================
 
@@ -455,6 +480,20 @@ class OASISScraperApp(QMainWindow):
         super().__init__()
         self.scraper_thread = None
         self.current_server = "ArXiv"
+        
+        # Create log filename with timestamp for this session
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        self.log_filename = f"logs/OASIS_Log_{timestamp}.txt"
+        
+        logging.basicConfig(
+            filename=self.log_filename,
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S"
+        )
+        
+        logging.info("=== New OASIS session started ===")
+
         self.init_ui()
 
     def init_ui(self):
@@ -948,6 +987,8 @@ class OASISScraperApp(QMainWindow):
                         QMessageBox.warning(self, "Input Error", "Add at least one search term.")
                         return
                     
+                    logging.info(f"Running search on server={self.current_server}, query='{query if self.current_server != 'ArXiv' else 'ArXiv advanced'}'")
+
                     self.scraper_thread = ScraperThread(
                         server_config=server_config,
                         query="",
@@ -968,6 +1009,8 @@ class OASISScraperApp(QMainWindow):
                     else:
                         url += f"&order={ARXIV_SORT_ORDER}"
                     
+                    logging.info(f"Running search on server={self.current_server}, query='{query if self.current_server != 'ArXiv' else 'ArXiv advanced'}'")
+
                     self.scraper_thread = ScraperThread(
                         server_config=server_config,
                         query="", 
@@ -984,11 +1027,14 @@ class OASISScraperApp(QMainWindow):
                 
                 search_mode = "api" if self.standard_radio.isChecked() else "weblike"
                 
+                logging.info(f"Running search on server={self.current_server}, query='{query if self.current_server != 'ArXiv' else 'ArXiv advanced'}'")
+
                 self.scraper_thread = ScraperThread(
                     server_config=server_config,
                     query=query,
                     search_mode=search_mode
                 )
+            
             
             # Connect thread signals
             self.scraper_thread.progress.connect(self.update_progress)
@@ -1000,6 +1046,9 @@ class OASISScraperApp(QMainWindow):
             self.scraper_error(str(e))
 
     def abort_scraper(self):
+      
+        logging.warning(f"Search aborted on server={self.current_server}")
+        
         if self.scraper_thread:
             self.feedback_text.append("\n⚠️ Aborting search...\n")
             self.scraper_thread.abort()
@@ -1010,6 +1059,9 @@ class OASISScraperApp(QMainWindow):
         self.feedback_text.ensureCursorVisible()
 
     def scraper_finished(self, df):
+      
+        logging.info(f"Search completed successfully on server={self.current_server}, results={len(df)}")
+
         self.spinner_movie.stop()
         self.run_button.setEnabled(True)
         self.run_button.setText("Start Search")
@@ -1039,6 +1091,9 @@ class OASISScraperApp(QMainWindow):
                                f"Successfully collected {len(df)} preprints.\n\nFile saved as: {filename}")
 
     def scraper_error(self, error_msg):
+        
+        logging.error(f"Search failed on server={self.current_server}, error={error_msg}")
+
         self.spinner_movie.stop()
         self.run_button.setEnabled(True)
         self.run_button.setText("Start Search")
