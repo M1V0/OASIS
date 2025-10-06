@@ -1,50 +1,42 @@
-import httpx
+"""
+OASIS - Open ArXiv Scraper for Implementing Systematic Reviews
+"""
+
 import os
-import pandas as pd
 import re
-import webbrowser
-import random
-import time
 import sys
+import time
+import random
+import logging
+import webbrowser
+from datetime import datetime
+
+import httpx
+import pandas as pd
+from bs4 import BeautifulSoup
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QTextEdit, QComboBox,
-    QRadioButton, QButtonGroup, QProgressBar, QMessageBox, QGroupBox,
+    QRadioButton, QButtonGroup, QMessageBox, QGroupBox,
     QTabWidget, QFrame, QGridLayout
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
-from PyQt6.QtGui import QFont, QPixmap, QIcon, QMovie
-from bs4 import BeautifulSoup
-import logging
-from datetime import datetime
+from PyQt6.QtGui import QPixmap, QIcon, QMovie
 
-
-# ==================== CONSTANTS AND CONFIGURATION ====================
-
-# ArXiv constants
+# ----------------- Constants -----------------
 ARXIV_PAGE_SIZE = 200
 ARXIV_SORT_ORDER = "-announced_date_first"
-
 ARXIV_HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) "
                   "AppleWebKit/537.36 (KHTML, like Gecko) "
                   "Chrome/106.0.0.0 Safari/537.36"
 }
 
-# OSF constants
 OSF_PAGE_SIZE = 100
 OSF_API_BASE = "https://api.osf.io/v2/preprints/"
 OSF_ELASTIC_URL = "https://share.osf.io/api/v2/search/creativeworks/_search"
 
-
-# Politeness constants - for rate limits
-POLITENESS_LEVELS = {
-    "Fast": {"osf_delay": 0.1, "arxiv_delay": 1.0},       # may risk hitting limits
-    "Normal": {"osf_delay": 0.5, "arxiv_delay": 3.0},     # safe default
-    "Very Safe": {"osf_delay": 1.0, "arxiv_delay": 5.0}   # extra cautious
-}
-
-# Server configurations
 SERVERS = {
     "ArXiv": {
         "type": "arxiv",
@@ -52,46 +44,18 @@ SERVERS = {
         "fields": ["all", "title", "abstract", "author"],
         "operators": ["AND", "OR"]
     },
-    "PsyArXiv": {
-        "type": "osf",
-        "display_name": "PsyArXiv",
-        "provider": "psyarxiv"
-    },
-    "SocArXiv": {
-        "type": "osf", 
-        "display_name": "SocArXiv",
-        "provider": "socarxiv"
-    },
-    "engrXiv": {
-        "type": "osf",
-        "display_name": "engrXiv",
-        "provider": "engrxiv"
-    },
-    "LawArXiv": {
-        "type": "osf",
-        "display_name": "LawArXiv",
-        "provider": "lawarxiv"
-    },
-    "MedArXiv": {
-        "type": "osf",
-        "display_name": "MedArXiv",
-        "provider": "medrxiv"
-    },
-    "ECSarXiv": {
-        "type": "osf",
-        "display_name": "ECSarXiv", 
-        "provider": "ecsarxiv"
-    },
-    "Thesis Commons": {
-        "type": "osf",
-        "display_name": "Thesis Commons",
-        "provider": "thesiscommons"
-    }
+    "PsyArXiv": {"type": "osf", "display_name": "PsyArXiv", "provider": "psyarxiv"},
+    "SocArXiv": {"type": "osf", "display_name": "SocArXiv", "provider": "socarxiv"},
+    "engrXiv": {"type": "osf", "display_name": "engrXiv", "provider": "engrxiv"},
+    "LawArXiv": {"type": "osf", "display_name": "LawArXiv", "provider": "lawarxiv"},
+    "MedArXiv": {"type": "osf", "display_name": "MedArXiv", "provider": "medrxiv"},
+    "ECSarXiv": {"type": "osf", "display_name": "ECSarXiv", "provider": "ecsarxiv"},
+    "Thesis Commons": {"type": "osf", "display_name": "Thesis Commons", "provider": "thesiscommons"},
 }
 
 OSF_PROVIDERS = {
     "psyarxiv": "PsyArXiv",
-    "socarxiv": "SocArXiv", 
+    "socarxiv": "SocArXiv",
     "engrxiv": "engrXiv",
     "lawarxiv": "LawArXiv",
     "medrxiv": "MedArXiv",
@@ -99,13 +63,70 @@ OSF_PROVIDERS = {
     "thesiscommons": "Thesis Commons"
 }
 
-# ==================== ARXIV SCRAPER FUNCTIONS ====================
+POLITENESS_CONFIG = {
+    "Fast": {"osf_delay": 0.0, "arxiv_delay": 0.5, "retries": 2},
+    "Normal": {"osf_delay": 0.5, "arxiv_delay": 3.0, "retries": 4},
+    "Slow": {"osf_delay": 1.0, "arxiv_delay": 5.0, "retries": 6},
+}
+
+# ----------------- Safe request helper -----------------
+
+
+def safe_request(method, url, client=None, retries=4, backoff_factor=2, politeness_delay=0.5, **kwargs):
+    """
+    Perform an HTTP request with retry/backoff for 429 and basic RequestError handling.
+    - method: "GET"/"POST"
+    - client: httpx.Client instance (optional)
+    - retries: number of retry attempts
+    - backoff_factor: base for exponential backoff
+    - politeness_delay: a delay after a successful request (seconds)
+    - kwargs forwarded to client.request()
+    """
+    attempt = 0
+    while True:
+        try:
+            if client is not None:
+                res = client.request(method, url, **kwargs)
+            else:
+                res = httpx.request(method, url, **kwargs)
+
+            # If we hit a rate limit, back off + jitter and retry
+            if res.status_code == 429:
+                wait = (backoff_factor ** attempt) + random.uniform(0, 1)
+                logging.warning(f"429 received for {url}. Backing off {wait:.1f}s (attempt {attempt + 1}/{retries}).")
+                time.sleep(wait)
+                attempt += 1
+                if attempt >= retries:
+                    res.raise_for_status()  # surface the 429 after exhausting retries
+                continue
+
+            res.raise_for_status()
+
+            # politeness delay after successful request
+            if politeness_delay and politeness_delay > 0:
+                time.sleep(politeness_delay)
+
+            return res
+
+        except httpx.RequestError as e:
+            # network-level failure
+            wait = (backoff_factor ** attempt) + random.uniform(0, 1)
+            logging.warning(f"Request error: {e}. Retrying in {wait:.1f}s (attempt {attempt + 1}/{retries}).")
+            time.sleep(wait)
+            attempt += 1
+            if attempt >= retries:
+                raise
+
+
+# ----------------- ArXiv scraping -----------------
+
 
 def extract_text(soup, selector):
     try:
         return soup.select_one(selector).get_text(strip=True)
-    except AttributeError:
+    except Exception:
         return None
+
 
 def find_data(soup):
     for p in soup.select("p"):
@@ -117,6 +138,7 @@ def find_data(soup):
             return sub, ann
     return None, None
 
+
 def parse_arxiv_page(content):
     soup = BeautifulSoup(content, "lxml")
     lis = soup.select("li.arxiv-result")
@@ -126,8 +148,8 @@ def parse_arxiv_page(content):
         link = li.find("p", class_="list-title")
         if link:
             a_tag = link.find("a")
-            if a_tag and 'href' in a_tag.attrs:
-                arxiv_id = a_tag['href'].split("/")[-1]
+            if a_tag and "href" in a_tag.attrs:
+                arxiv_id = a_tag["href"].split("/")[-1]
 
         title = extract_text(li, "p.title")
         authors = ",".join([a.get_text(strip=True) for a in li.select("p.authors > a")])
@@ -149,20 +171,24 @@ def parse_arxiv_page(content):
         })
     return results
 
-def scrape_arxiv(url, feedback_callback=None, progress_callback=None):
-    client = httpx.Client(headers=ARXIV_HEADERS)
+
+def scrape_arxiv(url, feedback_callback=None, progress_callback=None, politeness="Normal"):
+    client = httpx.Client(headers=ARXIV_HEADERS, timeout=30.0)
     all_results = {}
     page = 0
 
+    politeness_delay = POLITENESS_CONFIG.get(politeness, POLITENESS_CONFIG["Normal"])["arxiv_delay"]
+    retries = POLITENESS_CONFIG.get(politeness, POLITENESS_CONFIG["Normal"])["retries"]
+
     while True:
-        page_url = f"{url}&start={page*ARXIV_PAGE_SIZE}"
-        msg = f"Fetching ArXiv page {page+1}..."
-        print(msg)
+        page_url = f"{url}&start={page * ARXIV_PAGE_SIZE}"
+        msg = f"Fetching ArXiv page {page + 1}..."
         if feedback_callback:
             feedback_callback.emit(msg)
 
-        res = client.get(page_url, timeout=15)
+        res = safe_request("GET", page_url, client=client, retries=retries, backoff_factor=2, politeness_delay=politeness_delay, timeout=15)
         page_results = parse_arxiv_page(res.content)
+
         if not page_results:
             break
 
@@ -182,45 +208,18 @@ def scrape_arxiv(url, feedback_callback=None, progress_callback=None):
 
     return list(all_results.values())
 
-def build_arxiv_url_from_conditions(conditions):
-    if not conditions:
-        return ""
-    first_operator = conditions[0]['operator']
-    field = conditions[0]['field']
-    terms_list = []
-    for cond in conditions:
-        val = cond['value'].strip()
-        if val:
-            if not (val.startswith('"') and val.endswith('"')):
-                val = f'"{val}"'
-            terms_list.append(val)
-    terms_str = f" {first_operator} ".join(terms_list)
-    terms_encoded = terms_str.replace(" ", "+")
-    url = (
-        f"https://arxiv.org/search/advanced?advanced="
-        f"&terms-0-operator={first_operator}"
-        f"&terms-0-term={terms_encoded}"
-        f"&terms-0-field={field}"
-        f"&classification-physics_archives=all"
-        f"&classification-include_cross_list=include"
-        f"&date-filter_by=all_dates"
-        f"&date-year=&date-from_date=&date-to_date="
-        f"&date-date_type=submitted_date"
-        f"&abstracts=show"
-        f"&size={ARXIV_PAGE_SIZE}"
-        f"&order={ARXIV_SORT_ORDER}"
-    )
-    return url
 
-# ==================== OSF SCRAPER FUNCTIONS ====================
+# ----------------- OSF functions -----------------
+
 
 class OSFPreprints:
-    def __init__(self, provider="psyarxiv"):
+    def __init__(self, provider="psyarxiv", politeness="Normal"):
         self.provider = provider
         self.API = OSF_API_BASE
         self.client = httpx.Client(headers={"User-Agent": "Mozilla/5.0"}, timeout=30.0)
         self.results = []
         self.abort_flag = False
+        self.politeness = politeness
 
     def build_params(self, query=None, page=1):
         params = {
@@ -236,36 +235,11 @@ class OSFPreprints:
         if self.abort_flag:
             return None
         params = self.build_params(query=query, page=page)
-        res = self.client.get(self.API, params=params)
-        res.raise_for_status()
+        politeness_delay = POLITENESS_CONFIG.get(self.politeness, POLITENESS_CONFIG["Normal"])["osf_delay"]
+        retries = POLITENESS_CONFIG.get(self.politeness, POLITENESS_CONFIG["Normal"])["retries"]
+
+        res = safe_request("GET", self.API, client=self.client, params=params, retries=retries, backoff_factor=2, politeness_delay=politeness_delay)
         return res.json()
-
-    def parse_response(self, data):
-        rows = []
-        for item in data.get("data", []):
-            if self.abort_flag:
-                break
-            attrs = item.get("attributes", {}) or {}
-            title = attrs.get("title", "") or ""
-            desc = attrs.get("description", "") or ""
-            date = attrs.get("date_published", "") or ""
-            tags = attrs.get("tags", []) or []
-            doi = attrs.get("doi", "") or ""
-            url = item.get("links", {}).get("html", "") or ""
-            _id = item.get("id", "") or ""
-
-            rows.append({
-                "ID": _id,
-                "Title": title,
-                "Abstract": desc,
-                "Date Published": date,
-                "Tags": ",".join([t if isinstance(t, str) else str(t) for t in tags]),
-                "DOI": doi,
-                "URL": url,
-                "Contributors": "",
-                "Provider": self.provider,
-            })
-        return rows
 
     def run(self, query, progress_callback=None):
         self.results = []
@@ -276,43 +250,53 @@ class OSFPreprints:
             data = self.fetch_page(query, page)
             if data is None:
                 break
-            for row in self.parse_response(data):
+
+            for item in data.get("data", []):
                 if self.abort_flag:
                     break
-                self.results.append(row)
+                attrs = item.get("attributes", {}) or {}
+                tags = attrs.get("tags", []) if isinstance(attrs.get("tags", []), list) else []
+                self.results.append({
+                    "ID": item.get("id", ""),
+                    "Title": attrs.get("title", "") or "",
+                    "Abstract": attrs.get("description", "") or "",
+                    "Date Published": attrs.get("date_published", "") or "",
+                    "Tags": ",".join([t if isinstance(t, str) else str(t) for t in tags]),
+                    "DOI": attrs.get("doi", "") or "",
+                    "URL": item.get("links", {}).get("html", "") or "",
+                    "Contributors": "",
+                    "Provider": self.provider,
+                })
+
             if progress_callback:
                 progress_callback.emit(f"Fetched page {page}, {len(self.results)} results so far...")
             links = data.get("links", {}) or {}
             if not links.get("next") or self.abort_flag:
                 break
             page += 1
+
         df = pd.DataFrame(self.results)
         if "ID" not in df.columns:
             df["ID"] = ""
         return df.drop_duplicates(subset="ID")
 
+
 class ElasticPreprints:
-    def __init__(self, provider="psyarxiv"):
+    def __init__(self, provider="psyarxiv", politeness="Normal"):
         self.provider = provider
         self.client = httpx.Client(headers={"User-Agent": "Mozilla/5.0"}, timeout=30.0)
         self.abort_flag = False
+        self.politeness = politeness
 
     def normalize_query(self, query: str) -> str:
-        """Normalize boolean operators for ElasticSearch query_string syntax."""
         if not query:
             return query
-
-        # Replace symbols with uppercase operators
-        query = query.replace("|", " OR ")
-        query = query.replace("&", " AND ")
-
-        # Normalize lowercase boolean operators (use regex for word boundaries)
-        import re
+        # Replace symbol operators
+        query = query.replace("|", " OR ").replace("&", " AND ")
+        # Normalize words to uppercase boolean operators
         query = re.sub(r"\band\b", "AND", query, flags=re.IGNORECASE)
         query = re.sub(r"\bor\b", "OR", query, flags=re.IGNORECASE)
         query = re.sub(r"\bnot\b", "NOT", query, flags=re.IGNORECASE)
-
-        # Collapse multiple spaces
         query = re.sub(r"\s+", " ", query).strip()
         return query
 
@@ -321,8 +305,10 @@ class ElasticPreprints:
         size = 200
         start = 0
 
-        # ✅ normalize query before sending
         query = self.normalize_query(query)
+
+        politeness_delay = POLITENESS_CONFIG.get(self.politeness, POLITENESS_CONFIG["Normal"])["osf_delay"]
+        retries = POLITENESS_CONFIG.get(self.politeness, POLITENESS_CONFIG["Normal"])["retries"]
 
         while True:
             if self.abort_flag:
@@ -343,8 +329,7 @@ class ElasticPreprints:
                 "size": size
             }
 
-            res = self.client.post(OSF_ELASTIC_URL, json=payload)
-            res.raise_for_status()
+            res = safe_request("POST", OSF_ELASTIC_URL, client=self.client, json=payload, retries=retries, backoff_factor=2, politeness_delay=politeness_delay)
             data = res.json()
             hits = data.get("hits", {}).get("hits", [])
             if not hits:
@@ -354,19 +339,12 @@ class ElasticPreprints:
                 if self.abort_flag:
                     break
                 s = h.get("_source", {})
-
-                url = ""
-                links = s.get("links", {})
-                if isinstance(links, dict):
-                    url = links.get("html", "")
-
                 contributors = []
-                lists_contribs = s.get("lists", {}).get("contributors", [])
+                lists_contribs = s.get("lists", {}).get("contributors", []) if isinstance(s.get("lists", {}).get("contributors", []), list) else []
                 for c in lists_contribs:
                     name = c.get("name")
                     if name:
                         contributors.append(name)
-
                 rows.append({
                     "ID": s.get("id", ""),
                     "Title": s.get("title", ""),
@@ -374,7 +352,7 @@ class ElasticPreprints:
                     "Date Published": s.get("date_published", ""),
                     "Tags": ",".join(s.get("tags", []) if isinstance(s.get("tags", []), list) else []),
                     "DOI": s.get("doi", ""),
-                    "URL": url,
+                    "URL": s.get("links", {}).get("html", ""),
                     "Contributors": ", ".join(contributors),
                     "Provider": self.provider,
                 })
@@ -383,7 +361,6 @@ class ElasticPreprints:
                 progress_callback.emit(f"Fetched {len(rows)} results so far...")
 
             start += size
-
             if len(hits) < size:
                 break
 
@@ -393,15 +370,15 @@ class ElasticPreprints:
         return df.drop_duplicates(subset="ID")
 
 
-# ==================== WORKER THREAD ====================
+# ----------------- Worker thread -----------------
+
 
 class ScraperThread(QThread):
     progress = pyqtSignal(str)
-    progress_value = pyqtSignal(int)
     finished = pyqtSignal(pd.DataFrame)
     error = pyqtSignal(str)
 
-    def __init__(self, server_config, query, search_mode, conditions=None, url=None, politeness=None):
+    def __init__(self, server_config, query, search_mode, conditions=None, url=None, politeness="Normal"):
         super().__init__()
         self.server_config = server_config
         self.query = query
@@ -410,50 +387,62 @@ class ScraperThread(QThread):
         self.url = url
         self.client = None
         self.abort_flag = False
-        self.politeness = politeness or POLITENESS_LEVELS["Normal"]
+        self.politeness = politeness
 
-    def safe_request(client, method, url, politeness_delay=0.5, max_retries=5, **kwargs):
-        for attempt in range(max_retries):
-            res = client.request(method, url, **kwargs)
-            if res.status_code != 429:
-                time.sleep(politeness_delay)  # politeness delay after each call
-                return res
-            # Backoff if 429
-            wait = (2 ** attempt) + random.uniform(0, 1)
-            logging.warning(f"429 Too Many Requests. Backing off {wait:.1f} seconds...")
-            time.sleep(wait)
-        res.raise_for_status()
-        return res
-
-        
     def run(self):
         try:
             if self.server_config["type"] == "arxiv":
-                # ArXiv scraping
                 if self.url:
                     final_url = self.url
                 else:
-                    final_url = build_arxiv_url_from_conditions(self.conditions)
-                
-                self.progress.emit(f"Starting ArXiv scrape with URL: {final_url}")
-                results = scrape_arxiv(
-                    final_url, 
-                    feedback_callback=self.progress,
-                    progress_callback=self.progress_value
-                )
+                    # build ArXiv URL from conditions (re-implement minimal builder)
+                    terms_list = []
+                    first_operator = self.conditions[0]['operator'] if self.conditions else "AND"
+                    for cond in (self.conditions or []):
+                        val = cond['value'].strip()
+                        if val:
+                            if not (val.startswith('"') and val.endswith('"')):
+                                val = f'"{val}"'
+                            terms_list.append(val)
+                    terms_str = f" {first_operator} ".join(terms_list)
+                    terms_encoded = terms_str.replace(" ", "+")
+                    final_url = (
+                        f"https://arxiv.org/search/advanced?advanced="
+                        f"&terms-0-operator={first_operator}"
+                        f"&terms-0-term={terms_encoded}"
+                        f"&terms-0-field={self.conditions[0]['field'] if self.conditions else 'all'}"
+                        f"&classification-physics_archives=all"
+                        f"&classification-include_cross_list=include"
+                        f"&date-filter_by=all_dates"
+                        f"&date-year=&date-from_date=&date-to_date="
+                        f"&date-date_type=submitted_date"
+                        f"&abstracts=show"
+                        f"&size={ARXIV_PAGE_SIZE}"
+                        f"&order={ARXIV_SORT_ORDER}"
+                    )
+
+                self.progress.emit(f"Starting ArXiv scrape using query: {self.query or 'ArXiv build/paste'}")
+                # Log the exact url & note query
+                logging.info(f"ArXiv scrape started. URL: {final_url}")
+                logging.info(f"using query: {self.query}")
+                results = scrape_arxiv(final_url, feedback_callback=self.progress, progress_callback=None, politeness=self.politeness)
                 df = pd.DataFrame(results)
+
             else:
-                # OSF scraping
                 provider = self.server_config["provider"]
                 if self.search_mode == "api":
-                    self.client = OSFPreprints(provider=provider)
+                    self.client = OSFPreprints(provider=provider, politeness=self.politeness)
                 else:
-                    self.client = ElasticPreprints(provider=provider)
-                
+                    self.client = ElasticPreprints(provider=provider, politeness=self.politeness)
+
+                # Log the exact query we will use
+                logging.info(f"OSF scrape started on provider={provider}")
+                logging.info(f"using query: {self.query}")
+
+                self.progress.emit(f"Starting OSF scrape using query: {self.query}")
                 df = self.client.run(self.query, progress_callback=self.progress)
-            
+
             self.finished.emit(df)
-            
         except Exception as e:
             self.error.emit(str(e))
 
@@ -462,7 +451,9 @@ class ScraperThread(QThread):
         if self.client:
             self.client.abort_flag = True
 
-# ==================== INFO LABEL WITH QUESTION MARK ====================
+
+# ----------------- InfoLabel -----------------
+
 
 class InfoLabel(QLabel):
     def __init__(self, tooltip_text=""):
@@ -475,319 +466,175 @@ class InfoLabel(QLabel):
                 font-size: 11px;
                 background-color: #e6f3ff;
                 border: 1px solid #0066cc;
-                border-radius: 8px;  /* half of width/height to make circle */
+                border-radius: 8px;
                 min-width: 16px;
                 min-height: 16px;
                 max-width: 16px;
                 max-height: 16px;
                 margin: 2px;
             }
-            QLabel:hover {
-                background-color: #cce7ff;
-                color: #004499;
-            }
-            QToolTip {
-                background-color: #ffffe0;
-                color: black;
-                border: 2px solid #ffd700;
-                padding: 8px;
-                font-size: 12px;
-                max-width: 400px;
-                border-radius: 4px;
-            }
+            QLabel:hover { background-color: #cce7ff; color: #004499; }
         """)
         self.setCursor(Qt.CursorShape.WhatsThisCursor)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
 
-# ==================== MAIN WINDOW ====================
+# ----------------- Main Window -----------------
+
 
 class OASISScraperApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.scraper_thread = None
-        self.current_server = "ArXiv"
-        
-        # Ensure data/ and logs/ folders exist
+
+        # Ensure directories
         os.makedirs("data", exist_ok=True)
         os.makedirs("logs", exist_ok=True)
 
-        # Create log filename with timestamp for this session
+        # Logging (per-session file)
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        self.log_filename = f"logs/OASIS_Log_{timestamp}.txt"
-        
-        logging.basicConfig(
-            filename=self.log_filename,
-            level=logging.INFO,
-            format="%(asctime)s [%(levelname)s] %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S"
-        )
-        
+        self.log_filename = os.path.join("logs", f"OASIS_Log_{timestamp}.txt")
+        logging.basicConfig(filename=self.log_filename,
+                            level=logging.INFO,
+                            format="%(asctime)s [%(levelname)s] %(message)s",
+                            datefmt="%Y-%m-%d %H:%M:%S")
         logging.info("=== New OASIS session started ===")
+
+        self.scraper_thread = None
+        self.current_server = "ArXiv"
 
         self.init_ui()
 
     def init_ui(self):
         self.setWindowTitle("OASIS - Open ArXiv Scraper for Implementing Systematic Reviews")
-        self.setGeometry(100, 100, 900, 650)  # More compact window size
-        
-        # Apply modern stylesheet
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #f5f5f5;
-            }
-            QLabel {
-                color: black;
-            }
-            QGroupBox {
-                font-weight: bold;
-                border: 2px solid #cccccc;
-                border-radius: 6px;
-                margin-top: 8px;
-                padding-top: 8px;
-                background-color: white;
-                color: black;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px;
-            }
-            QLineEdit, QTextEdit, QComboBox {
-                padding: 6px;
-                border: 1px solid #ccc;
-                border-radius: 4px;
-                background-color: white;
-                color: black;
-                font-size: 13px;
-            }
-            QLineEdit:focus, QTextEdit:focus, QComboBox:focus {
-                border: 2px solid #0066cc;
-            }
-            QPushButton {
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-weight: bold;
-                font-size: 13px;
-            }
-            QPushButton#runButton {
-                background-color: #28a745;
-                color: white;
-                border: none;
-            }
-            QPushButton#runButton:hover {
-                background-color: #218838;
-            }
-            QPushButton#runButton:pressed {
-                background-color: #1e7e34;
-            }
-            QPushButton#abortButton {
-                background-color: #dc3545;
-                color: white;
-                border: none;
-            }
-            QPushButton#abortButton:hover {
-                background-color: #c82333;
-            }
-            QRadioButton {
-                font-size: 12px;
-                spacing: 6px;
-                color: black;
-                background-color: transparent;
-            }
-            QRadioButton::indicator {
-                width: 16px;
-                height: 16px;
-                border-radius: 8px;
-                border: 2px solid #666;
-                background-color: white;
-            }
-            QRadioButton::indicator:checked {
-                background-color: #28a745;
-                border: 2px solid #28a745;
-            }
-            QRadioButton::indicator:hover {
-                border: 2px solid #28a745;
-            }
-            QProgressBar {
-                border: 1px solid #ccc;
-                border-radius: 4px;
-                text-align: center;
-                height: 20px;
-            }
-            QProgressBar::chunk {
-                background-color: #28a745;
-                border-radius: 3px;
-            }
-            QTabWidget::pane {
-                border: 1px solid #ccc;
-                background-color: white;
-            }
-            QTabBar::tab {
-                background-color: #e0e0e0;
-                padding: 6px 12px;
-                margin-right: 2px;
-                border-radius: 4px;
-                font-size: 12px;
-            }
-            QTabBar::tab:selected {
-                background-color: #28a745;
-                color: white;
-            }
-        """)
+        self.setGeometry(100, 100, 710, 600)
 
-        # Central widget
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
-        main_layout.setSpacing(10)  # Reduced spacing
-        main_layout.setContentsMargins(15, 15, 15, 15)  # Reduced margins
+        # central layout
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
+        
+        #header layout
+        header_layout = QHBoxLayout()
+        
+        # Logo
+        self.logo_label = QLabel()
+        pixmap = QPixmap("var/OASIS.png")
+        
+        # Scale the logo proportionally
+        scaled_pixmap = pixmap.scaledToHeight(60, Qt.TransformationMode.SmoothTransformation)
+        self.logo_label.setPixmap(scaled_pixmap)
+        self.logo_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.logo_label.setToolTip("OASIS Preprint Scraper")
+        
+        # Title
+        header = QLabel("OASIS — Open ArXiv Scraper for Implementing Systematic Reviews")
+        header.setStyleSheet("font-size: 16px; font-weight: bold;")
+        
+        # Add both to the horizontal layout
+        header_layout.addWidget(self.logo_label)
+        header_layout.addSpacing(10)  # small gap between logo and text
+        header_layout.addWidget(header)
+        header_layout.addStretch()  # push them to the left if you want
+        
+        # Then add that layout to your main (vertical) layout
+        layout.addLayout(header_layout)
+        
 
-        # Header with OASIS branding and graphic
-        header_frame = QFrame()
-        header_frame.setStyleSheet("QFrame { background-color: #2c5aa0; border-radius: 6px; padding: 8px; }")
-        header_layout = QHBoxLayout(header_frame)
-        
-        # Graphic placeholder
-        try:
-            graphic_pixmap = QPixmap("var/OASIS.png")
-            if not graphic_pixmap.isNull():
-                graphic_label = QLabel()
-                graphic_label.setPixmap(graphic_pixmap.scaled(75, 75, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-            else:
-                graphic_label = QLabel("🌐")
-                graphic_label.setStyleSheet("font-size: 40px; color: white;")
-                graphic_label.setFixedSize(60, 60)
-        except:
-            graphic_label = QLabel("🌐")
-            graphic_label.setStyleSheet("font-size: 40px; color: white;")
-            graphic_label.setFixedSize(60, 60)
-        
-        # Title section
-        title_layout = QVBoxLayout()
-        title_label = QLabel("OASIS")
-        title_label.setStyleSheet("""
-            QLabel {
-                font-size: 24px;
-                font-weight: bold;
-                color: white;
-                padding: 2px;
-            }
-        """)
-        subtitle_label = QLabel("Open ArXiv Scraper for Implementing Systematic Reviews")
-        subtitle_label.setStyleSheet("""
-            QLabel {
-                font-size: 12px;
-                color: #e6e6e6;
-                font-style: italic;
-                padding: 1px;
-            }
-        """)
-        title_layout.addWidget(title_label)
-        title_layout.addWidget(subtitle_label)
-        
-        header_layout.addWidget(graphic_label)
-        header_layout.addLayout(title_layout)
-        header_layout.addStretch()
-        
-        main_layout.addWidget(header_frame)
-
-        # Combined Server and Strategy Selection
+        # Config group (server, strategy, politeness)
         config_group = QGroupBox("Search Configuration")
         config_layout = QHBoxLayout()
-        
-        # Politeness setting
-        politeness_label = QLabel("| Politeness:")
-        self.politeness_combo = QComboBox()
-        self.politeness_combo.addItems(POLITENESS_LEVELS.keys())
-        self.politeness_combo.setCurrentText("Normal")
 
-
-        # Server selection
         server_label = QLabel("Server:")
-        server_info = InfoLabel("Choose which preprint server to search. \nArXiv covers physics, math, CS, etc.\nOSF servers are discipline-specific.")
-        
+        server_info = InfoLabel("Choose which preprint server to search.")
         self.server_combo = QComboBox()
         self.server_combo.addItems(list(SERVERS.keys()))
+        self.server_combo.setCurrentText("ArXiv")
         self.server_combo.currentTextChanged.connect(self.server_changed)
-        
-        # Strategy selection
+
+        # Strategy (for OSF only)
         self.strategy_label = QLabel("Strategy:")
-        self.strategy_info = InfoLabel("OSF API: Official. Faster, title-only search\nWeblike Search: Unofficial OSF search, mimics the web search.\n Slower, searches titles AND abstracts")
-        
+        self.strategy_info = InfoLabel("OSF API: Official title-only search. Weblike: Elastic full-text-ish search.")
         self.strategy_group = QButtonGroup()
         self.standard_radio = QRadioButton("OSF API")
         self.comprehensive_radio = QRadioButton("Weblike API")
         self.standard_radio.setChecked(True)
-        
         self.strategy_group.addButton(self.standard_radio)
         self.strategy_group.addButton(self.comprehensive_radio)
-        
-        # Add widgets to layout
+
+        # Politeness
+        politeness_label = QLabel("Politeness:")
+        politeness_info = InfoLabel("Choose request politeness. Normal = default, Fast = minimal delay, Slow = adds delays between requests.")
+        self.politeness_combo = QComboBox()
+        self.politeness_combo.addItems(list(POLITENESS_CONFIG.keys()))
+        self.politeness_combo.setCurrentText("Normal")
+
         config_layout.addWidget(server_label)
         config_layout.addWidget(server_info)
         config_layout.addWidget(self.server_combo)
-        config_layout.addStretch()
+        config_layout.addSpacing(10)
         config_layout.addWidget(self.strategy_label)
         config_layout.addWidget(self.strategy_info)
         config_layout.addWidget(self.standard_radio)
         config_layout.addWidget(self.comprehensive_radio)
+        config_layout.addStretch()
         config_layout.addWidget(politeness_label)
+        config_layout.addWidget(politeness_info)
         config_layout.addWidget(self.politeness_combo)
 
-        
         config_group.setLayout(config_layout)
-        main_layout.addWidget(config_group)
+        layout.addWidget(config_group)
 
-        # Create tab widget for different search modes
+        # Tabs: ArXiv Build, ArXiv Paste, OSF Query
         self.tabs = QTabWidget()
-        
-        # ArXiv tab (Build Query)
         self.arxiv_build_tab = QWidget()
-        self.setup_arxiv_build_tab()
-        self.tabs.addTab(self.arxiv_build_tab, "Build Query")
-        
-        # ArXiv tab (Paste URL)
         self.arxiv_paste_tab = QWidget()
-        self.setup_arxiv_paste_tab()
-        self.tabs.addTab(self.arxiv_paste_tab, "Paste URL")
-        
-        # OSF tab
         self.osf_tab = QWidget()
-        self.setup_osf_tab()
+        self.tabs.addTab(self.arxiv_build_tab, "Build Query")
+        self.tabs.addTab(self.arxiv_paste_tab, "Paste URL")
         self.tabs.addTab(self.osf_tab, "OSF Query")
-        
-        main_layout.addWidget(self.tabs)
 
-        # Combined Options and Buttons
+        layout.addWidget(self.tabs)
+
+        # ArXiv build tab content
+        self.setup_arxiv_build_tab()
+
+        # ArXiv paste tab content
+        self.setup_arxiv_paste_tab()
+
+        # OSF tab content
+        self.setup_osf_tab()
+
+        # Action area
         action_group = QGroupBox("Output & Actions")
         action_layout = QHBoxLayout()
-        
-        # Filename
-        filename_label = QLabel("Filename:")
-        filename_info = InfoLabel("Base filename for CSV output. \nServer and mode will be appended automatically.")
-        
-        self.filename_input = QLineEdit("SystematicReview_Data")
-        self.filename_input.setToolTip("Base filename for systematic review screening data")
-        
-        # Buttons
+
+        filename_label = QLabel("Filename base:")
+        filename_info = InfoLabel("Base filename for CSV output. Server and mode appended.")
+        self.filename_input = QLineEdit("OASIS_search")
+
         self.preview_button = QPushButton("Preview URL")
         self.preview_button.clicked.connect(self.preview_url)
-        
+
+        # Start Search button with spinner
         self.run_button = QPushButton("Start Search")
         self.run_button.setObjectName("runButton")
         self.run_button.clicked.connect(self.run_scraper)
-        
-        # Prepare spinner but don’t show yet
-        self.spinner_movie = QMovie("var/spinner.gif")
-        self.spinner_movie.setScaledSize(QSize(16, 16))  # make spinner small enough
-        
+
+        # Prepare spinner movie (external file expected at var/spinner.gif or var/spinner.gif fallback)
+        gif_path = "var/spinner.gif"
+        if not os.path.exists(gif_path):
+            gif_path = "spinner.gif"  # allow alternative location
+        try:
+            self.spinner_movie = QMovie(gif_path)
+            self.spinner_movie.setScaledSize(QSize(16, 16))
+        except Exception:
+            self.spinner_movie = None
+
         self.abort_button = QPushButton("Abort")
         self.abort_button.setObjectName("abortButton")
         self.abort_button.clicked.connect(self.abort_scraper)
         self.abort_button.setEnabled(False)
-        
-        # Add to layout
+
         action_layout.addWidget(filename_label)
         action_layout.addWidget(filename_info)
         action_layout.addWidget(self.filename_input)
@@ -795,226 +642,202 @@ class OASISScraperApp(QMainWindow):
         action_layout.addWidget(self.preview_button)
         action_layout.addWidget(self.run_button)
         action_layout.addWidget(self.abort_button)
-        
-        action_group.setLayout(action_layout)
-        main_layout.addWidget(action_group)
 
-        # Feedback area
-        feedback_group = QGroupBox("Results")
-        feedback_layout = QVBoxLayout()
-        
+        action_group.setLayout(action_layout)
+        layout.addWidget(action_group)
+
+        # Feedback/results area
+        results_group = QGroupBox("Results Log")
+        results_layout = QVBoxLayout()
         self.feedback_text = QTextEdit()
         self.feedback_text.setReadOnly(True)
-        self.feedback_text.setMaximumHeight(120)  # Reduced height
-        self.feedback_text.setPlaceholderText("Search progress and results will appear here...")
-        
-        feedback_layout.addWidget(self.feedback_text)
-        feedback_group.setLayout(feedback_layout)
-        main_layout.addWidget(feedback_group)
-        
-        # Footer section
-        footer_frame = QFrame()
-        footer_layout = QHBoxLayout(footer_frame)
-        footer_layout.setContentsMargins(0, 5, 0, 0)
-        
-        license_link = QLabel('<a href="https://creativecommons.org/licenses/by-nc-sa/4.0/">CC-BY-NC-SA License</a>')
-        license_link.setOpenExternalLinks(True)
-        license_link.setStyleSheet("color: #0066cc;")
-        
-        github_link = QLabel('<a href="https://github.com/M1V0/OASIS">GitHub</a>')
-        github_link.setOpenExternalLinks(True)
-        github_link.setStyleSheet("color: #0066cc;")
-        
+        self.feedback_text.setMaximumHeight(200)
+        results_layout.addWidget(self.feedback_text)
+        results_group.setLayout(results_layout)
+        layout.addWidget(results_group)
+
+        # Footer (license, github, creator)
+        footer = QFrame()
+        footer_layout = QHBoxLayout(footer)
+        license_label = QLabel('<a href="https://creativecommons.org/licenses/by/4.0/">CC-BY License</a>')
+        license_label.setOpenExternalLinks(True)
+        github_label = QLabel('<a href="https://github.com/M1V0/OASIS">GitHub</a>')
+        github_label.setOpenExternalLinks(True)
         creator_label = QLabel("Created by Matthew Ivory")
         creator_label.setStyleSheet("color: gray; font-size: 11px;")
-        
-        footer_layout.addWidget(license_link)
-        footer_layout.addSpacing(15)
-        footer_layout.addWidget(github_link)
+
+        footer_layout.addWidget(license_label)
+        footer_layout.addSpacing(12)
+        footer_layout.addWidget(github_label)
         footer_layout.addStretch()
         footer_layout.addWidget(creator_label)
-        
-        main_layout.addWidget(footer_frame)
+        layout.addWidget(footer)
 
-        # Initialize UI state
-        self.server_changed("ArXiv")
+        # Set initial server UI state
+        self.server_changed(self.server_combo.currentText())
 
     def setup_arxiv_build_tab(self):
         layout = QVBoxLayout(self.arxiv_build_tab)
-        layout.setSpacing(8)
-        
-        # Condition builder
-        condition_group = QGroupBox("Search Conditions")
-        condition_layout = QVBoxLayout()
-        
-        # Condition rows container
+        # condition builder: small grid
+        cond_group = QGroupBox("Search Conditions")
+        cond_layout = QVBoxLayout()
+
         self.condition_rows_widget = QWidget()
         self.condition_rows_layout = QGridLayout(self.condition_rows_widget)
-        self.condition_rows_layout.setColumnStretch(3, 1)
-        self.condition_rows_layout.setVerticalSpacing(5)
-        
-        # Headers
         self.condition_rows_layout.addWidget(QLabel("#"), 0, 0)
         self.condition_rows_layout.addWidget(QLabel("Operator"), 0, 1)
         self.condition_rows_layout.addWidget(QLabel("Field"), 0, 2)
         self.condition_rows_layout.addWidget(QLabel("Search Term"), 0, 3)
-        
-        condition_layout.addWidget(self.condition_rows_widget)
-        
-        # Add/Remove buttons
-        button_layout = QHBoxLayout()
+        self.condition_rows_layout.setColumnStretch(3, 1)
+
+        cond_layout.addWidget(self.condition_rows_widget)
+
+        btn_layout = QHBoxLayout()
         self.add_condition_button = QPushButton("➕ Add Term")
         self.add_condition_button.clicked.connect(self.add_condition_row)
         self.remove_condition_button = QPushButton("➖ Remove Term")
         self.remove_condition_button.clicked.connect(self.remove_condition_row)
-        
-        button_layout.addWidget(self.add_condition_button)
-        button_layout.addWidget(self.remove_condition_button)
-        button_layout.addStretch()
-        
-        condition_layout.addLayout(button_layout)
-        condition_group.setLayout(condition_layout)
-        layout.addWidget(condition_group)
-        
-        # Add initial condition row
+        btn_layout.addWidget(self.add_condition_button)
+        btn_layout.addWidget(self.remove_condition_button)
+        btn_layout.addStretch()
+        cond_layout.addLayout(btn_layout)
+
+        cond_group.setLayout(cond_layout)
+        layout.addWidget(cond_group)
+
         self.condition_rows = []
         self.add_condition_row()
 
     def setup_arxiv_paste_tab(self):
         layout = QVBoxLayout(self.arxiv_paste_tab)
-        
-        paste_group = QGroupBox("Paste ArXiv URL")
-        paste_layout = QVBoxLayout()
-        
-        url_info = InfoLabel("Paste a complete ArXiv advanced search URL. \nThe tool will optimise it for systematic review data extraction.")
-        
+        group = QGroupBox("Paste ArXiv Advanced Search URL")
+        g_l = QVBoxLayout()
+        info = InfoLabel("Paste a complete ArXiv advanced search URL. The tool will optimise it for systematic extraction.")
         self.paste_url_text = QTextEdit()
         self.paste_url_text.setMaximumHeight(80)
-        self.paste_url_text.setPlaceholderText("Paste your ArXiv search URL here...\nExample: https://arxiv.org/search/advanced?advanced=...")
-        
-        paste_layout.addWidget(url_info)
-        paste_layout.addWidget(self.paste_url_text)
-        paste_group.setLayout(paste_layout)
-        
-        layout.addWidget(paste_group)
+        g_l.addWidget(info)
+        g_l.addWidget(self.paste_url_text)
+        group.setLayout(g_l)
+        layout.addWidget(group)
 
     def setup_osf_tab(self):
         layout = QVBoxLayout(self.osf_tab)
-        
-        # Query input
-        query_group = QGroupBox("Search Query")
-        query_layout = QVBoxLayout()
-        
-        query_info = InfoLabel("Enter search terms. \nOSF API mode searches titles only. \nWeblike Search mode supports Boolean operators \nand searches titles + abstracts.")
-        
+        group = QGroupBox("OSF Search")
+        g_l = QVBoxLayout()
+        info = InfoLabel("Enter search terms. OSF API searches titles only; Weblike uses titles, abstracts, and keywords.")
         self.osf_query_input = QTextEdit()
-        self.osf_query_input.setMaximumHeight(60)
-        self.osf_query_input.setPlaceholderText("Enter search terms...\n e.g. 'cognitive therapy AND depression'")
-        
-        query_layout.addWidget(query_info)
-        query_layout.addWidget(self.osf_query_input)
-        query_group.setLayout(query_layout)
-        layout.addWidget(query_group)
+        self.osf_query_input.setMaximumHeight(80)
+        self.osf_query_input.setPlaceholderText("e.g. cognitive therapy AND depression")
+        g_l.addWidget(info)
+        g_l.addWidget(self.osf_query_input)
+        group.setLayout(g_l)
+        layout.addWidget(group)
 
     def add_condition_row(self):
-        row_index = len(self.condition_rows) + 1  # +1 because of header row
-        
-        row = {}
-        
-        # Operator
-        op_var = QComboBox()
-        op_var.addItems(["AND", "OR"])
+        row_index = len(self.condition_rows) + 1
+        op = QComboBox()
+        op.addItems(["AND", "OR"])
         if len(self.condition_rows) == 0:
-            op_var.setEnabled(False)  # First row doesn't need operator
-        row['operator'] = op_var
-        
-        # Field
-        field_var = QComboBox()
-        field_var.addItems(SERVERS["ArXiv"]["fields"])
-        row['field'] = field_var
-        
-        # Value
-        value_var = QLineEdit()
-        value_var.setPlaceholderText("Enter search term...")
-        row['value'] = value_var
-        
-        # Add to layout
+            op.setEnabled(False)
+        field = QComboBox()
+        field.addItems(SERVERS["ArXiv"]["fields"])
+        value = QLineEdit()
+        value.setPlaceholderText("Enter search term...")
+        # add widgets
         self.condition_rows_layout.addWidget(QLabel(f"{len(self.condition_rows) + 1}."), row_index, 0)
-        self.condition_rows_layout.addWidget(op_var, row_index, 1)
-        self.condition_rows_layout.addWidget(field_var, row_index, 2)
-        self.condition_rows_layout.addWidget(value_var, row_index, 3)
-        
-        self.condition_rows.append(row)
+        self.condition_rows_layout.addWidget(op, row_index, 1)
+        self.condition_rows_layout.addWidget(field, row_index, 2)
+        self.condition_rows_layout.addWidget(value, row_index, 3)
+        self.condition_rows.append({"operator": op, "field": field, "value": value})
 
     def remove_condition_row(self):
-        if len(self.condition_rows) > 0:
-            last_row = self.condition_rows.pop()
-            # Remove widgets from layout
-            row_index = len(self.condition_rows) + 1  # +1 because of header row
-            for i in reversed(range(self.condition_rows_layout.count())):
-                widget = self.condition_rows_layout.itemAt(i).widget()
-                if widget in [last_row['operator'], last_row['field'], last_row['value']]:
-                    widget.deleteLater()
-            
-            # Remove the number label
-            for i in reversed(range(self.condition_rows_layout.count())):
-                widget = self.condition_rows_layout.itemAt(i).widget()
-                if isinstance(widget, QLabel) and widget.text() == f"{len(self.condition_rows) + 1}.":
-                    widget.deleteLater()
-                    break
+        if not self.condition_rows:
+            return
+        last = self.condition_rows.pop()
+        # delete widgets (simple approach)
+        last["operator"].deleteLater()
+        last["field"].deleteLater()
+        last["value"].deleteLater()
+        # remove the numbering label by searching for it
+        for i in reversed(range(self.condition_rows_layout.count())):
+            w = self.condition_rows_layout.itemAt(i).widget()
+            if isinstance(w, QLabel) and w.text() == f"{len(self.condition_rows) + 1}.":
+                w.deleteLater()
+                break
 
     def server_changed(self, server_name):
         self.current_server = server_name
         server_config = SERVERS[server_name]
-        
         if server_config["type"] == "arxiv":
-            # Hide strategy widgets
+            # hide OSF strategy widgets
             self.strategy_label.setVisible(False)
             self.strategy_info.setVisible(False)
             self.standard_radio.setVisible(False)
             self.comprehensive_radio.setVisible(False)
-    
-            # Show ArXiv tabs, hide OSF tab
-            self.tabs.setTabVisible(0, True)   # Build Query
-            self.tabs.setTabVisible(1, True)   # Paste URL
-            self.tabs.setTabVisible(2, False)  # OSF Query
+            # show arxiv tabs
+            self.tabs.setTabVisible(0, True)
+            self.tabs.setTabVisible(1, True)
+            self.tabs.setTabVisible(2, False)
             self.tabs.setCurrentIndex(0)
             self.preview_button.setVisible(True)
-    
         else:
-            # Show strategy widgets
             self.strategy_label.setVisible(True)
             self.strategy_info.setVisible(True)
             self.standard_radio.setVisible(True)
             self.comprehensive_radio.setVisible(True)
-    
-            # Show OSF tab, hide ArXiv tabs
             self.tabs.setTabVisible(0, False)
             self.tabs.setTabVisible(1, False)
             self.tabs.setTabVisible(2, True)
             self.tabs.setCurrentIndex(2)
             self.preview_button.setVisible(False)
 
+    # ---------- Utilities for filenames ----------
+    @staticmethod
+    def unique_filename(path):
+        """
+        If path exists, append _1, _2, ... before extension.
+        """
+        base, ext = os.path.splitext(path)
+        counter = 1
+        new = path
+        while os.path.exists(new):
+            new = f"{base}_{counter}{ext}"
+            counter += 1
+        return new
+
+    # ---------- Main runner ----------
     def run_scraper(self):
         server_config = SERVERS[self.current_server]
-        base_filename = self.filename_input.text().strip() or "SystematicReview_Data"
-        
+        base_filename = self.filename_input.text().strip() or "OASIS_search"
+        politeness = self.politeness_combo.currentText()
+
+        # Clear feedback
         self.feedback_text.clear()
-        self.spinner_movie.start()
-        self.run_button.setEnabled(False)
-        self.run_button.setText(" Searching...")  # Add space for spinner
-        self.run_button.setIcon(QIcon(self.spinner_movie.currentPixmap()))
-        self.spinner_movie.frameChanged.connect(
-            lambda: self.run_button.setIcon(QIcon(self.spinner_movie.currentPixmap()))
-        )
-        self.spinner_movie.start()
+
+        # Start spinner inside button (if movie available)
+        if self.spinner_movie:
+            # ensure no duplicate connections
+            try:
+                self.spinner_movie.frameChanged.disconnect()
+            except Exception:
+                pass
+            self.run_button.setEnabled(False)
+            self.run_button.setText(" Searching...")
+            if self.spinner_movie.currentPixmap() and not self.spinner_movie.currentPixmap().isNull():
+                self.run_button.setIcon(QIcon(self.spinner_movie.currentPixmap()))
+            self.spinner_movie.frameChanged.connect(lambda: self.run_button.setIcon(QIcon(self.spinner_movie.currentPixmap())))
+            self.spinner_movie.start()
+        else:
+            self.run_button.setEnabled(False)
+            self.run_button.setText(" Searching...")
+
         self.abort_button.setEnabled(True)
 
-
         try:
+            # prepare thread args
             if server_config["type"] == "arxiv":
-                # ArXiv scraping
-                if self.tabs.currentIndex() == 0:  # Build Query tab
+                # ArXiv mode
+                if self.tabs.currentIndex() == 0:  # Build Query
                     conditions = []
                     for row in self.condition_rows:
                         field = row['field'].currentText()
@@ -1022,147 +845,145 @@ class OASISScraperApp(QMainWindow):
                         value = row['value'].text().strip()
                         if value:
                             conditions.append({'field': field, 'operator': operator, 'value': value})
-                    
                     if not conditions:
                         QMessageBox.warning(self, "Input Error", "Add at least one search term.")
+                        # reset button
+                        self._reset_run_button()
                         return
-                    
-                    logging.info(f"Running search on server={self.current_server}, query='{query if self.current_server != 'ArXiv' else 'ArXiv advanced'}'")
-                    
-                    politeness = POLITENESS_LEVELS[self.politeness_combo.currentText()]
+
+                    # Log exact conditions (build string for log clarity)
+                    constructed_terms = " ".join([f"{c['operator']} {c['value']}" if i != 0 else c['value']
+                                                  for i, c in enumerate(conditions)])
+                    logging.info(f"Starting ArXiv Build Query search (conditions: {constructed_terms})")
+                    log_query_str = constructed_terms
 
                     self.scraper_thread = ScraperThread(
                         server_config=server_config,
-                        query=query,
-                        search_mode=search_mode,
-                        conditions=conditions if server_config["type"] == "arxiv" else None,
-                        url=url if server_config["type"] == "arxiv" and self.tabs.currentIndex() == 1 else None,
+                        query=log_query_str,
+                        search_mode="build_query",
+                        conditions=conditions,
+                        url=None,
                         politeness=politeness
                     )
 
-                    
                 else:  # Paste URL tab
                     url = self.paste_url_text.toPlainText().strip()
                     if not url:
                         QMessageBox.warning(self, "Input Error", "Please paste a valid ArXiv search URL.")
+                        self._reset_run_button()
                         return
-                    
-                    # Force page size and order
-                    url = re.sub(r'size=\d+', f"size={ARXIV_PAGE_SIZE}", url)
+                    # Force size & order
+                    url = re.sub(r"size=\d+", f"size={ARXIV_PAGE_SIZE}", url)
                     if "order=" in url:
-                        url = re.sub(r'order=[^&]+', f"order={ARXIV_SORT_ORDER}", url)
+                        url = re.sub(r"order=[^&]+", f"order={ARXIV_SORT_ORDER}", url)
                     else:
                         url += f"&order={ARXIV_SORT_ORDER}"
-                    
-                    logging.info(f"Running search on server={self.current_server}, query='{query if self.current_server != 'ArXiv' else 'ArXiv advanced'}'")
-
-                    politeness = POLITENESS_LEVELS[self.politeness_combo.currentText()]
-
+                    logging.info(f"Starting ArXiv Paste URL search. URL: {url}")
+                    logging.info(f"using query: {url}")
                     self.scraper_thread = ScraperThread(
                         server_config=server_config,
-                        query=query,
-                        search_mode=search_mode,
-                        conditions=conditions if server_config["type"] == "arxiv" else None,
-                        url=url if server_config["type"] == "arxiv" and self.tabs.currentIndex() == 1 else None,
+                        query=url,
+                        search_mode="paste_url",
+                        conditions=None,
+                        url=url,
                         politeness=politeness
                     )
-                    
+
             else:
-                # OSF scraping
+                # OSF mode
                 query = self.osf_query_input.toPlainText().strip()
                 if not query:
                     QMessageBox.warning(self, "Input Error", "Please enter search terms.")
+                    self._reset_run_button()
                     return
-                
                 search_mode = "api" if self.standard_radio.isChecked() else "weblike"
-                
-                logging.info(f"Running search on server={self.current_server}, query='{query if self.current_server != 'ArXiv' else 'ArXiv advanced'}'")
-
-                politeness = POLITENESS_LEVELS[self.politeness_combo.currentText()]
-
+                logging.info(f"Starting OSF search on provider={self.current_server}, mode={search_mode}")
+                logging.info(f"using query: {query}")
                 self.scraper_thread = ScraperThread(
                     server_config=server_config,
                     query=query,
                     search_mode=search_mode,
-                    conditions=conditions if server_config["type"] == "arxiv" else None,
-                    url=url if server_config["type"] == "arxiv" and self.tabs.currentIndex() == 1 else None,
                     politeness=politeness
-                    )
-            
-            
-            # Connect thread signals
+                )
+
+            # connect signals
             self.scraper_thread.progress.connect(self.update_progress)
             self.scraper_thread.finished.connect(self.scraper_finished)
             self.scraper_thread.error.connect(self.scraper_error)
             self.scraper_thread.start()
-            
+
         except Exception as e:
             self.scraper_error(str(e))
 
+    def _reset_run_button(self):
+        """Reset run button UI and spinner."""
+        if self.spinner_movie:
+            try:
+                self.spinner_movie.stop()
+            except Exception:
+                pass
+            try:
+                self.spinner_movie.frameChanged.disconnect()
+            except Exception:
+                pass
+        self.run_button.setEnabled(True)
+        self.run_button.setText("Start Search")
+        self.run_button.setIcon(QIcon())
+        self.abort_button.setEnabled(False)
+
     def abort_scraper(self):
-      
         logging.warning(f"Search aborted on server={self.current_server}")
-        
         if self.scraper_thread:
             self.feedback_text.append("\n⚠️ Aborting search...\n")
             self.scraper_thread.abort()
             self.abort_button.setEnabled(False)
+        self._reset_run_button()
 
     def update_progress(self, message):
+        # append message to feedback box and to log
         self.feedback_text.append(message)
-        self.feedback_text.ensureCursorVisible()
+        logging.info(message)
 
     def scraper_finished(self, df):
-      
+        # log completion
         logging.info(f"Search completed successfully on server={self.current_server}, results={len(df)}")
 
-        self.spinner_movie.stop()
-        self.run_button.setEnabled(True)
-        self.run_button.setText("Start Search")
-        self.run_button.setIcon(QIcon())  # remove spinner
-        self.run_button.setEnabled(True)
-        self.abort_button.setEnabled(False)
+        # stop spinner and reset button
+        self._reset_run_button()
 
-        if df.empty:
+        if df is None or df.empty:
             self.feedback_text.append("\n❌ No preprints found.\n")
             QMessageBox.warning(self, "No Results", "No preprints were found matching your criteria.")
             return
 
-        base_filename = self.filename_input.text().strip() or "SystematicReview_Data"
+        base_filename = self.filename_input.text().strip() or "OASIS_search"
         server_name = self.current_server
-        
+
         if SERVERS[server_name]["type"] == "arxiv":
-            filename = f"data/{base_filename}_{server_name}.csv"
+            filename = os.path.join("data", f"{base_filename}_{server_name}.csv")
         else:
             search_mode = "OSF_API" if self.standard_radio.isChecked() else "weblike"
-            filename = f"data/{base_filename}_{server_name}_{search_mode}.csv"
-        
-        df.to_csv(filename, index=False)
-        
-        msg = f"\n✅ Search complete! {len(df)} preprints saved to '{filename}'"
+            filename = os.path.join("data", f"{base_filename}_{server_name}_{search_mode}.csv")
+
+        unique = self.unique_filename(filename)
+        df.to_csv(unique, index=False)
+
+        msg = f"\nSearch complete. {len(df)} preprints saved to '{unique}'"
         self.feedback_text.append(msg)
-        QMessageBox.information(self, "Search Complete", 
-                               f"Successfully collected {len(df)} preprints.\n\nFile saved as: {filename}")
+        logging.info(msg)
+        QMessageBox.information(self, "Search Complete", f"Successfully collected {len(df)} preprints.\n\nFile saved as: {unique}\nLog file: {self.log_filename}")
 
     def scraper_error(self, error_msg):
-        
         logging.error(f"Search failed on server={self.current_server}, error={error_msg}")
-
-        self.spinner_movie.stop()
-        self.run_button.setEnabled(True)
-        self.run_button.setText("Start Search")
-        self.run_button.setIcon(QIcon())  # remove spinner
-        self.run_button.setEnabled(True)
-        self.abort_button.setEnabled(False)
-        
-        self.feedback_text.append(f"\n❌ Error: {error_msg}\n")
+        self.feedback_text.append(f"\n Error: {error_msg}\n")
         QMessageBox.critical(self, "Search Error", f"An error occurred:\n{error_msg}")
+        self._reset_run_button()
 
     def preview_url(self):
+        # Only works in ArXiv Build Query
         if self.current_server != "ArXiv" or self.tabs.currentIndex() != 0:
             QMessageBox.information(self, "Preview URL", "URL preview works only in ArXiv Build Query mode.")
             return
-
         conditions = []
         for row in self.condition_rows:
             field = row['field'].currentText()
@@ -1170,12 +991,34 @@ class OASISScraperApp(QMainWindow):
             value = row['value'].text().strip()
             if value:
                 conditions.append({'field': field, 'operator': operator, 'value': value})
-
         if not conditions:
             QMessageBox.warning(self, "Preview URL", "Add at least one search term first.")
             return
-
-        url = build_arxiv_url_from_conditions(conditions)
+        # Build same way ScraperThread does for build
+        first_operator = conditions[0]['operator']
+        terms_list = []
+        for cond in conditions:
+            val = cond['value'].strip()
+            if val:
+                if not (val.startswith('"') and val.endswith('"')):
+                    val = f'"{val}"'
+                terms_list.append(val)
+        terms_str = f" {first_operator} ".join(terms_list)
+        terms_encoded = terms_str.replace(" ", "+")
+        url = (
+            f"https://arxiv.org/search/advanced?advanced="
+            f"&terms-0-operator={first_operator}"
+            f"&terms-0-term={terms_encoded}"
+            f"&terms-0-field={conditions[0]['field'] if conditions else 'all'}"
+            f"&classification-physics_archives=all"
+            f"&classification-include_cross_list=include"
+            f"&date-filter_by=all_dates"
+            f"&date-year=&date-from_date=&date-to_date="
+            f"&date-date_type=submitted_date"
+            f"&abstracts=show"
+            f"&size={ARXIV_PAGE_SIZE}"
+            f"&order={ARXIV_SORT_ORDER}"
+        )
 
         popup = QMessageBox(self)
         popup.setWindowTitle("OASIS - Generated Search URL")
@@ -1183,19 +1026,21 @@ class OASISScraperApp(QMainWindow):
         popup.setDetailedText(url)
         popup.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Open)
         popup.button(QMessageBox.StandardButton.Open).setText("🔍 Open in Browser")
-        
         result = popup.exec()
         if result == QMessageBox.StandardButton.Open:
             webbrowser.open(url)
 
-# ==================== MAIN ====================
 
-if __name__ == "__main__":
+# ----------------- Main -----------------
+
+
+def main():
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
-    app.setApplicationName("OASIS")
-    app.setApplicationVersion("1.0")
-    
     window = OASISScraperApp()
     window.show()
     sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
