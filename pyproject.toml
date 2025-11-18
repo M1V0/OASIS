@@ -1,3 +1,10 @@
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "OASIS"
+version = "0.0.0"
+dependencies = [
+  "beautifulsoup4>=4.11.1",
+]
