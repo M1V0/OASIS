@@ -9,7 +9,7 @@ import pandas as pd
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QTextEdit, QComboBox, QRadioButton, QButtonGroup, QMessageBox,
-    QGroupBox, QTabWidget, QFrame, QGridLayout, QListWidget, QListWidgetItem
+    QGroupBox, QTabWidget, QFrame, QGridLayout, QCheckBox
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPixmap, QIcon, QMovie
@@ -82,25 +82,36 @@ class OASISWidget(QWidget):
         server_info = QLabel("?")
         server_info.setStyleSheet(self.info_style)
         server_info.setToolTip("Choose which preprint server to search.")
-        self.server_combo = QComboBox()
-        # unified dropdown
-        self.server_combo.addItems(["ArXiv", "OSF"])
-        self.server_combo.setCurrentText("ArXiv")
-        self.server_combo.currentTextChanged.connect(self.server_changed)
+        # Replace dropdown with radio buttons
+        self.server_button_group = QButtonGroup(self)
+        self.arxiv_radio = QRadioButton("ArXiv")
+        self.osf_radio = QRadioButton("OSF")
+        self.arxiv_radio.setChecked(True)
+        self.server_button_group.addButton(self.arxiv_radio)
+        self.server_button_group.addButton(self.osf_radio)
+        # connect radios
+        self.arxiv_radio.toggled.connect(lambda checked: self.server_changed("ArXiv") if checked else None)
+        self.osf_radio.toggled.connect(lambda checked: self.server_changed("OSF") if checked else None)
 
-        # OSF multi-select list (hidden for ArXiv)
-        self.osf_server_list = QListWidget()
-        for name in ["PsyArXiv", "SocArXiv", "LawArXiv"]:
-            item = QListWidgetItem(name)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Unchecked)
-            self.osf_server_list.addItem(item)
-            
+        # OSF repositories presented horizontally as checkboxes (hidden for ArXiv)
+        self.osf_repo_widget = QWidget()
+        osf_repo_layout = QHBoxLayout(self.osf_repo_widget)
+        osf_repo_layout.setContentsMargins(0, 0, 0, 0)
+        self.osf_server_checks = []
+        # default list kept as before
+        osf_providers = ["PsyArXiv", "SocArXiv", "LawArXiv"]
+        for name in osf_providers:
+            cb = QCheckBox(name)
+            cb.setChecked(False)
+            self.osf_server_checks.append(cb)
+            osf_repo_layout.addWidget(cb)
+        osf_repo_layout.addStretch()
+
         # Strategy (for OSF only)
         self.strategy_label = QLabel("Strategy:")
         self.strategy_info = QLabel("?")
         self.strategy_info.setStyleSheet(self.info_style)
-        self.strategy_info.setToolTip("Choose whether to use the OSF API (title search only) or the Weklike search (title, abstract, and keywords).")
+        self.strategy_info.setToolTip("Choose whether to use the OSF API (title search only) or the Weblike search (title, abstract, and keywords).")
         self.standard_radio = QRadioButton("OSF API")
         self.comprehensive_radio = QRadioButton("Weblike API")
         self.standard_radio.setChecked(True)
@@ -113,10 +124,20 @@ class OASISWidget(QWidget):
         self.politeness_combo.addItems(list(POLITENESS_CONFIG.keys()))
         self.politeness_combo.setCurrentText("Normal")
 
-        config_layout.addWidget(server_label)
-        config_layout.addWidget(server_info)
-        config_layout.addWidget(self.server_combo)
-        config_layout.addWidget(self.osf_server_list)
+        # Put server selection and radios in a vertical widget so OSF repos can sit on a new line below
+        server_widget = QWidget()
+        server_vlayout = QVBoxLayout(server_widget)
+        server_vlayout.setContentsMargins(0, 0, 0, 0)
+        top_row = QHBoxLayout()
+        top_row.addWidget(server_label)
+        top_row.addWidget(server_info)
+        top_row.addWidget(self.arxiv_radio)
+        top_row.addWidget(self.osf_radio)
+        top_row.addStretch()
+        server_vlayout.addLayout(top_row)
+        server_vlayout.addWidget(self.osf_repo_widget)
+
+        config_layout.addWidget(server_widget)
         config_layout.addSpacing(10)
         config_layout.addWidget(self.strategy_label)
         config_layout.addWidget(self.strategy_info)
@@ -129,18 +150,21 @@ class OASISWidget(QWidget):
         config_group.setLayout(config_layout)
         layout.addWidget(config_group)
 
-        # Tabs (arxiv build/paste + OSF)
+        # Tabs (arxiv build/paste_query/paste_url + OSF)
         self.tabs = QTabWidget()
         self.arxiv_build_tab = QWidget()
+        self.arxiv_paste_query_tab = QWidget()
         self.arxiv_paste_tab = QWidget()
         self.osf_tab = QWidget()
         self.tabs.addTab(self.arxiv_build_tab, "Build Query")
+        self.tabs.addTab(self.arxiv_paste_query_tab, "Write/Paste Query")
         self.tabs.addTab(self.arxiv_paste_tab, "Paste URL")
         self.tabs.addTab(self.osf_tab, "OSF Query")
         layout.addWidget(self.tabs)
 
         # Setup each tab content (mirrors original UI)
         self.setup_arxiv_build_tab()
+        self.setup_arxiv_paste_query_tab()
         self.setup_arxiv_paste_tab()
         self.setup_osf_tab()
 
@@ -204,7 +228,7 @@ class OASISWidget(QWidget):
         layout.addWidget(footer)
 
         # initial state
-        self.server_changed(self.server_combo.currentText())
+        self.server_changed("ArXiv")
 
     def setup_arxiv_build_tab(self):
         layout = QVBoxLayout(self.arxiv_build_tab)
@@ -236,6 +260,21 @@ class OASISWidget(QWidget):
         self.condition_rows = []
         self.add_condition_row()
 
+    def setup_arxiv_paste_query_tab(self):
+        layout = QVBoxLayout(self.arxiv_paste_query_tab)
+        group = QGroupBox("Paste ArXiv Query")
+        g_l = QVBoxLayout()
+        info = QLabel("?")
+        info.setStyleSheet(self.info_style)
+        info.setToolTip("Paste an ArXiv query string (e.g., advanced query parts) to be used directly for searching.")
+        self.paste_query_text = QTextEdit()
+        self.paste_query_text.setMaximumHeight(80)
+        self.paste_query_text.setPlaceholderText("e.g. all:machine learning AND ti:\"deep learning\"")
+        g_l.addWidget(info)
+        g_l.addWidget(self.paste_query_text)
+        group.setLayout(g_l)
+        layout.addWidget(group)
+
     def setup_arxiv_paste_tab(self):
         layout = QVBoxLayout(self.arxiv_paste_tab)
         group = QGroupBox("Paste ArXiv Advanced Search URL")
@@ -252,7 +291,47 @@ class OASISWidget(QWidget):
 
     def setup_osf_tab(self):
         layout = QVBoxLayout(self.osf_tab)
-        group = QGroupBox("OSF Search")
+        # inner tabs for OSF: Build Query (like ArXiv) or Free Text / Paste Query
+        self.osf_inner_tabs = QTabWidget()
+        self.osf_build_tab = QWidget()
+        self.osf_free_tab = QWidget()
+        self.osf_inner_tabs.addTab(self.osf_build_tab, "Build Query")
+        self.osf_inner_tabs.addTab(self.osf_free_tab, "Write/paste query")
+        layout.addWidget(self.osf_inner_tabs)
+
+        # Build Query similar to ArXiv
+        build_layout = QVBoxLayout(self.osf_build_tab)
+        cond_group = QGroupBox("OSF Search Conditions")
+        cond_layout = QVBoxLayout()
+
+        self.osf_condition_rows_widget = QWidget()
+        self.osf_condition_rows_layout = QGridLayout(self.osf_condition_rows_widget)
+        self.osf_condition_rows_layout.addWidget(QLabel("#"), 0, 0)
+        self.osf_condition_rows_layout.addWidget(QLabel("Operator"), 0, 1)
+        self.osf_condition_rows_layout.addWidget(QLabel("Field"), 0, 2)
+        self.osf_condition_rows_layout.addWidget(QLabel("Search Term"), 0, 3)
+        self.osf_condition_rows_layout.setColumnStretch(3, 1)
+
+        cond_layout.addWidget(self.osf_condition_rows_widget)
+
+        btn_layout = QHBoxLayout()
+        self.osf_add_condition_button = QPushButton("➕ Add Term")
+        self.osf_remove_condition_button = QPushButton("➖ Remove Term")
+        self.osf_add_condition_button.clicked.connect(self.add_osf_condition_row)
+        self.osf_remove_condition_button.clicked.connect(self.remove_osf_condition_row)
+        btn_layout.addWidget(self.osf_add_condition_button)
+        btn_layout.addWidget(self.osf_remove_condition_button)
+        btn_layout.addStretch()
+        cond_layout.addLayout(btn_layout)
+        cond_group.setLayout(cond_layout)
+        build_layout.addWidget(cond_group)
+
+        self.osf_condition_rows = []
+        self.add_osf_condition_row()
+
+        # Free text / paste tab
+        free_layout = QVBoxLayout(self.osf_free_tab)
+        group = QGroupBox("OSF Free Text Query")
         g_l = QVBoxLayout()
         info = QLabel("?")
         info.setStyleSheet(self.info_style)
@@ -263,7 +342,7 @@ class OASISWidget(QWidget):
         g_l.addWidget(info)
         g_l.addWidget(self.osf_query_input)
         group.setLayout(g_l)
-        layout.addWidget(group)
+        free_layout.addWidget(group)
 
     def add_condition_row(self):
         row_index = len(self.condition_rows) + 1
@@ -272,7 +351,7 @@ class OASISWidget(QWidget):
         if len(self.condition_rows) == 0:
             op.setEnabled(False)
         field = QComboBox()
-        field.addItems(SERVERS["ArXiv"]["fields"])
+        field.addItems(SERVERS.get("ArXiv", {}).get("fields", ["all"]))
         value = QLineEdit()
         value.setPlaceholderText("Enter search term...")
         self.condition_rows_layout.addWidget(QLabel(f"{len(self.condition_rows) + 1}."), row_index, 0)
@@ -294,6 +373,36 @@ class OASISWidget(QWidget):
                 w.deleteLater()
                 break
 
+    def add_osf_condition_row(self):
+        row_index = len(self.osf_condition_rows) + 1
+        op = QComboBox()
+        op.addItems(["AND", "OR"])
+        if len(self.osf_condition_rows) == 0:
+            op.setEnabled(False)
+        # use OSF-specific fields if present in config, otherwise sensible defaults
+        field = QComboBox()
+        field.addItems(SERVERS.get("OSF", {}).get("fields", ["title", "abstract", "keywords"]))
+        value = QLineEdit()
+        value.setPlaceholderText("Enter search term...")
+        self.osf_condition_rows_layout.addWidget(QLabel(f"{len(self.osf_condition_rows) + 1}."), row_index, 0)
+        self.osf_condition_rows_layout.addWidget(op, row_index, 1)
+        self.osf_condition_rows_layout.addWidget(field, row_index, 2)
+        self.osf_condition_rows_layout.addWidget(value, row_index, 3)
+        self.osf_condition_rows.append({"operator": op, "field": field, "value": value})
+
+    def remove_osf_condition_row(self):
+        if not self.osf_condition_rows:
+            return
+        last = self.osf_condition_rows.pop()
+        last["operator"].deleteLater()
+        last["field"].deleteLater()
+        last["value"].deleteLater()
+        for i in reversed(range(self.osf_condition_rows_layout.count())):
+            w = self.osf_condition_rows_layout.itemAt(i).widget()
+            if isinstance(w, QLabel) and w.text() == f"{len(self.osf_condition_rows) + 1}.":
+                w.deleteLater()
+                break
+
     def server_changed(self, server_name):
         self.current_server = server_name
         server_config = SERVERS.get(server_name, {"type": "arxiv"})
@@ -304,12 +413,15 @@ class OASISWidget(QWidget):
             self.strategy_info.setVisible(False)
             self.standard_radio.setVisible(False)
             self.comprehensive_radio.setVisible(False)
+            # arXiv tabs: Build, Paste Query, Paste URL visible; OSF tab hidden
             self.tabs.setTabVisible(0, True)
             self.tabs.setTabVisible(1, True)
-            self.tabs.setTabVisible(2, False)
+            self.tabs.setTabVisible(2, True)
+            self.tabs.setTabVisible(3, False)
             self.tabs.setCurrentIndex(0)
+            # preview useful for build query; keep visible for Build Query
             self.preview_button.setVisible(True)
-            self.osf_server_list.setVisible(False)
+            self.osf_repo_widget.setVisible(False)
     
         elif server_config.get("type") == "osf":
             # OSF mode (multi-server)
@@ -317,12 +429,14 @@ class OASISWidget(QWidget):
             self.strategy_info.setVisible(True)
             self.standard_radio.setVisible(True)
             self.comprehensive_radio.setVisible(True)
+            # Only show OSF tab
             self.tabs.setTabVisible(0, False)
             self.tabs.setTabVisible(1, False)
-            self.tabs.setTabVisible(2, True)
-            self.tabs.setCurrentIndex(2)
+            self.tabs.setTabVisible(2, False)
+            self.tabs.setTabVisible(3, True)
+            self.tabs.setCurrentIndex(3)
             self.preview_button.setVisible(False)
-            self.osf_server_list.setVisible(True)
+            self.osf_repo_widget.setVisible(True)
 
 
     def run_scraper(self):
@@ -341,6 +455,7 @@ class OASISWidget(QWidget):
         try:
             if server_config["type"] == "arxiv":
                 # ArXiv mode
+                # Tab indices: 0 = Build Query, 1 = Paste Query, 2 = Paste URL
                 if self.tabs.currentIndex() == 0:  # Build Query
                     conditions = []
                     for row in self.condition_rows:
@@ -368,7 +483,23 @@ class OASISWidget(QWidget):
                         politeness=politeness
                     )
 
-                else:  # Paste URL tab
+                elif self.tabs.currentIndex() == 1:  # Paste Query (raw query string)
+                    query = self.paste_query_text.toPlainText().strip()
+                    if not query:
+                        QMessageBox.warning(self, "Input Error", "Please paste a valid ArXiv query.")
+                        self._reset_run_button()
+                        return
+                    logging.info(f"Starting ArXiv Paste Query search. Query: {query}")
+                    self.scraper_thread = ScraperThread(
+                        server_config=server_config,
+                        query=query,
+                        search_mode="paste_query",
+                        conditions=None,
+                        url=None,
+                        politeness=politeness
+                    )
+
+                else:  # Paste URL tab (index 2)
                     url = self.paste_url_text.toPlainText().strip()
                     if not url:
                         QMessageBox.warning(self, "Input Error", "Please paste a valid ArXiv search URL.")
@@ -398,16 +529,34 @@ class OASISWidget(QWidget):
 
             else:
                 # OSF mode (multi-provider support)
-                query = self.osf_query_input.toPlainText().strip()
-                if not query:
-                    QMessageBox.warning(self, "Input Error", "Please enter search terms.")
-                    self._reset_run_button()
-                    return
-                search_mode = "api" if self.standard_radio.isChecked() else "weblike"
+                # Determine if using build query or free text
+                use_build = (self.osf_inner_tabs.currentIndex() == 0)
+                if use_build:
+                    conditions = []
+                    for row in self.osf_condition_rows:
+                        field = row['field'].currentText()
+                        operator = row['operator'].currentText() if row['operator'].isEnabled() else "AND"
+                        value = row['value'].text().strip()
+                        if value:
+                            conditions.append({'field': field, 'operator': operator, 'value': value})
+                    if not conditions:
+                        QMessageBox.warning(self, "Input Error", "Add at least one OSF search term.")
+                        self._reset_run_button()
+                        return
+                    search_mode = "build_query"
+                    query_payload = conditions  # pass conditions
+                else:
+                    query = self.osf_query_input.toPlainText().strip()
+                    if not query:
+                        QMessageBox.warning(self, "Input Error", "Please enter search terms.")
+                        self._reset_run_button()
+                        return
+                    search_mode = "api" if self.standard_radio.isChecked() else "weblike"
+                    query_payload = query
 
-                selected_providers = [self.osf_server_list.item(i).text()
-                                      for i in range(self.osf_server_list.count())
-                                      if self.osf_server_list.item(i).checkState() == Qt.CheckState.Checked]
+                selected_providers = [cb.text()
+                                      for cb in self.osf_server_checks
+                                      if cb.isChecked()]
                 if not selected_providers:
                     QMessageBox.warning(self, "Input Error", "Select at least one OSF server.")
                     self._reset_run_button()
@@ -419,7 +568,11 @@ class OASISWidget(QWidget):
                     prov_config = SERVERS.get(prov_name)
                     logging.info(f"Starting OSF search on provider={prov_name}, mode={search_mode}")
                     self.feedback_text.append(f"\n🔍 Searching {prov_name}...\n")
-                    worker = ScraperThread(server_config=prov_config, query=query, search_mode=search_mode, politeness=politeness)
+                    # pass conditions when build_query, else pass string query
+                    kwargs = dict(server_config=prov_config, query=query_payload, search_mode=search_mode, politeness=politeness)
+                    if use_build:
+                        kwargs["conditions"] = query_payload
+                    worker = ScraperThread(**kwargs)
                     # connect ephemeral signals synchronously via blocking run in thread
                     worker.progress.connect(self.update_progress)
                     worker.finished.connect(lambda df, p=prov_name: self._collect_and_continue(df, p, base_filename, search_mode))
