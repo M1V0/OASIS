@@ -2,7 +2,7 @@
 import time
 import logging
 import httpx
-from bs4 import BeautifulSoup
+from beautifulsoup4 import BeautifulSoup
 
 from ..config import ARXIV_PAGE_SIZE, ARXIV_HEADERS, ARXIV_SORT_ORDER
 from ..utils import safe_request
