@@ -1,10 +1,24 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=65.5.1", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "OASIS"
-version = "0.0.0"
+version = "0.0.1"
+description = "OASIS Python package"
+readme = { file = "README.md", content-type = "text/markdown" }
+authors = [ { name = "M1V0" } ]
+license = { text = "MIT" }
+requires-python = ">=3.10"
 dependencies = [
   "beautifulsoup4>=4.11.1",
 ]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: OS Independent",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["OASIS*"]
+exclude = ["tests*"]
