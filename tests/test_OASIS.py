@@ -1,6 +1,6 @@
 # test_oasis.py
 import logging
-from OASIS_full import OSFPreprints, ElasticPreprints, scrape_arxiv
+from OASIS import OSFPreprints, ElasticPreprints, scrape_arxiv
 
 def run_tests():
     logging.basicConfig(level=logging.INFO)
